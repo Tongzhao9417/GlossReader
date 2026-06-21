@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "postinstall": "mkdir -p public/embedpdf && cp node_modules/@embedpdf/snippet/dist/pdfium.wasm public/embedpdf/pdfium.wasm"
+    "postinstall": "node scripts/copy-pdfium.mjs"
   },
   "dependencies": {
     "@embedpdf/react-pdf-viewer": "^2.14.4",
