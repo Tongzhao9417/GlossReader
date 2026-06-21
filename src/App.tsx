@@ -18,6 +18,13 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openPdfFiles, readPdfFile, type OpenPdfResult } from "./lib/tauriCommands";
 import { type Settings as SettingsType, loadSettings, saveSettings } from "./lib/settings";
+import {
+  DEFAULT_FIND_SHORTCUT,
+  DEFAULT_GLOSS_SHORTCUT,
+  formatKeyboardShortcutLabel,
+  isKeyboardShortcut,
+  normalizeKeyboardShortcut,
+} from "./lib/keyboardShortcuts";
 import { fetchGloss, fetchTranslation } from "./lib/aiService";
 import { checkAndInstallUpdate } from "./lib/updater";
 import {
@@ -41,10 +48,16 @@ const SELECTION_CONTEXT_MENU_WIDTH = 160;
 const SELECTION_CONTEXT_MENU_HEIGHT = 80;
 const ANNOTATION_CONTEXT_MENU_WIDTH = 236;
 const ANNOTATION_CONTEXT_MENU_HEIGHT = 292;
+const SELECTION_CONTEXT_SNAPSHOT_MAX_AGE = 1500;
+const SELECTION_CONTEXT_SNAPSHOT_MAX_DISTANCE = 12;
+const DEFAULT_PDF_INTERACTION_MODE = "pointerMode";
+const PDF_FIND_COMMAND_ID = "panel:toggle-search";
+const KNOWN_PDF_FIND_SHORTCUTS = ["Ctrl+F", "Meta+F", "Ctrl+D", "Meta+D"];
 const GLOSS_ANNOTATIONS_STORAGE_KEY = "glossreader-gloss-annotations";
 const TRANSLATIONS_STORAGE_KEY = "glossreader-side-translations";
 const INLINE_GLOSS_MAX_WORDS = 5;
 const INLINE_GLOSS_MAX_CHARS = 48;
+const RECENT_SELECTION_REQUEST_MAX_AGE = 5000;
 
 interface OpenDocument {
   id: string;
@@ -79,8 +92,10 @@ interface PdfTask<T> {
 
 interface SelectionPluginLike {
   __glossReaderWordBoundaryPatch?: boolean;
+  __glossReaderContextMenuClearPatch?: boolean;
   coreState: {
     core: {
+      activeDocumentId: string | null;
       documents: Record<string, { document?: unknown } | undefined>;
     };
   };
@@ -108,6 +123,7 @@ interface SelectionPluginLike {
     charIndex: number,
     modeId: string,
   ) => void;
+  clearSelection: (documentId: string, modeId?: string) => void;
   applyInstantSelection: (
     documentId: string,
     page: number,
@@ -125,6 +141,9 @@ interface SelectionCapabilityLike {
   getHighlightRectsForPage: (page: number) => PdfRectLike[];
   getSelectedText: () => PdfTask<string[]>;
   clear: () => void;
+  onSelectionChange?: (
+    listener: (event: { selection: SelectionRange | null }) => void,
+  ) => () => void;
 }
 
 interface SelectionPluginWithCapability {
@@ -152,6 +171,40 @@ interface PluginWithCapability<T> {
   provides?: () => T;
 }
 
+type CommandSource = "keyboard" | "ui" | "api";
+
+interface PdfCommandLike {
+  id: string;
+  shortcuts?: string | string[];
+  [key: string]: unknown;
+}
+
+interface ResolvedPdfCommandLike {
+  disabled: boolean;
+  visible: boolean;
+}
+
+interface CommandsCapabilityLike {
+  resolve: (
+    commandId: string,
+    documentId?: string,
+  ) => ResolvedPdfCommandLike;
+  execute: (
+    commandId: string,
+    documentId?: string,
+    source?: CommandSource,
+  ) => void;
+  getCommandByShortcut: (shortcut: string) => PdfCommandLike | null;
+  getAllShortcuts: () => Map<string, string>;
+  registerCommand: (command: PdfCommandLike) => void;
+  unregisterCommand: (commandId: string) => void;
+}
+
+interface CommandsPluginLike extends PluginWithCapability<CommandsCapabilityLike> {
+  commands?: Map<string, PdfCommandLike>;
+  shortcutMap?: Map<string, string>;
+}
+
 type AnnotationContextTarget = {
   kind: "gloss" | "translation";
   id: string;
@@ -163,6 +216,7 @@ type ContextMenuState =
       x: number;
       y: number;
       canCopy: boolean;
+      request?: SelectedGlossRequest;
     }
   | {
       type: "annotation";
@@ -176,6 +230,15 @@ interface SelectedGlossRequest {
   anchor: GlossAnnotationAnchor;
 }
 
+interface SelectionContextSnapshot {
+  createdAt: number;
+  pointerX: number;
+  pointerY: number;
+  insideSelection: boolean;
+  request?: SelectedGlossRequest;
+  pendingRequest?: Promise<SelectedGlossRequest | null>;
+}
+
 interface PdfSource {
   name: string;
   data: ArrayBuffer;
@@ -184,6 +247,8 @@ interface PdfSource {
 
 const WORD_CHARACTER_PATTERN = /[\p{L}\p{N}]/u;
 const PARAGRAPH_BREAK_TOKEN = "\u0000GLOSSREADER_PARAGRAPH_BREAK\u0000";
+let suppressPdfSelectionClearUntil = 0;
+let suppressPdfSelectionClearForPointerDown = false;
 const QUICK_FONT_SIZE_OPTIONS = [
   "8px",
   "10px",
@@ -524,6 +589,108 @@ function patchSelectionWordBoundary(registry: PluginRegistry) {
   };
 }
 
+function suppressPdfSelectionClearForContextPointerDown() {
+  suppressPdfSelectionClearUntil = performance.now() + 500;
+  suppressPdfSelectionClearForPointerDown = true;
+  window.setTimeout(() => {
+    suppressPdfSelectionClearForPointerDown = false;
+  }, 0);
+}
+
+function shouldSuppressPdfSelectionClear() {
+  if (
+    !suppressPdfSelectionClearForPointerDown ||
+    performance.now() > suppressPdfSelectionClearUntil
+  ) {
+    return false;
+  }
+
+  const currentEvent = window.event as MouseEvent | PointerEvent | undefined;
+  return (
+    !currentEvent ||
+    (currentEvent.type === "pointerdown" &&
+      isContextMenuPointerEvent(currentEvent))
+  );
+}
+
+function patchSelectionContextMenuClear(registry: PluginRegistry) {
+  const selectionPlugin = registry.getPlugin(
+    "selection",
+  ) as SelectionPluginLike | null;
+
+  if (
+    !selectionPlugin ||
+    selectionPlugin.__glossReaderContextMenuClearPatch ||
+    typeof selectionPlugin.clearSelection !== "function"
+  ) {
+    return;
+  }
+
+  const originalClearSelection =
+    selectionPlugin.clearSelection.bind(selectionPlugin);
+  selectionPlugin.__glossReaderContextMenuClearPatch = true;
+
+  selectionPlugin.clearSelection = (documentId: string, modeId?: string) => {
+    if (shouldSuppressPdfSelectionClear()) return;
+    originalClearSelection(documentId, modeId);
+  };
+}
+
+function normalizePdfCommandShortcut(shortcut: string) {
+  return shortcut.toLowerCase().split("+").sort().join("+");
+}
+
+function getConfiguredShortcut(shortcut: string, fallback: string) {
+  return normalizeKeyboardShortcut(shortcut) || fallback;
+}
+
+function getPdfFindShortcuts(findShortcut: string) {
+  return [getConfiguredShortcut(findShortcut, DEFAULT_FIND_SHORTCUT)];
+}
+
+function patchPdfFindShortcut(
+  registry: PluginRegistry | null,
+  findShortcut: string,
+) {
+  const commandsPlugin = registry?.getPlugin(
+    "commands",
+  ) as CommandsPluginLike | null;
+  const commands = commandsPlugin?.provides?.();
+
+  if (!commandsPlugin || !commands) return;
+
+  const shortcuts = getPdfFindShortcuts(findShortcut);
+  const findCommand =
+    commandsPlugin.commands?.get(PDF_FIND_COMMAND_ID) ??
+    [...KNOWN_PDF_FIND_SHORTCUTS, ...shortcuts]
+      .map((shortcut) => commands.getCommandByShortcut(shortcut))
+      .find((command) => command?.id === PDF_FIND_COMMAND_ID);
+
+  if (findCommand) {
+    commands.unregisterCommand(PDF_FIND_COMMAND_ID);
+    commands.registerCommand({
+      ...findCommand,
+      shortcuts,
+    });
+  }
+
+  const shortcutMap = commandsPlugin.shortcutMap;
+  if (!shortcutMap) return;
+
+  KNOWN_PDF_FIND_SHORTCUTS.forEach((shortcut) => {
+    const normalized = normalizePdfCommandShortcut(shortcut);
+    if (shortcutMap.get(normalized) === PDF_FIND_COMMAND_ID) {
+      shortcutMap.delete(normalized);
+    }
+  });
+
+  if (commandsPlugin.commands?.has(PDF_FIND_COMMAND_ID) || findCommand) {
+    shortcuts.forEach((shortcut) => {
+      shortcutMap.set(normalizePdfCommandShortcut(shortcut), PDF_FIND_COMMAND_ID);
+    });
+  }
+}
+
 function getSelectionCapability(registry: PluginRegistry | null) {
   const selectionPlugin = registry?.getPlugin(
     "selection",
@@ -550,6 +717,10 @@ function getViewportCapability(registry: PluginRegistry | null) {
 
 function getZoomCapability(registry: PluginRegistry | null) {
   return getPluginCapability<ZoomCapabilityLike>(registry, "zoom");
+}
+
+function getCommandsCapability(registry: PluginRegistry | null) {
+  return getPluginCapability<CommandsCapabilityLike>(registry, "commands");
 }
 
 function hasTextSelection(registry: PluginRegistry | null) {
@@ -771,6 +942,13 @@ function isCopyKeyboardShortcut(event: KeyboardEvent) {
   );
 }
 
+function isFindKeyboardShortcut(event: KeyboardEvent, shortcut: string) {
+  return isKeyboardShortcut(
+    event,
+    getConfiguredShortcut(shortcut, DEFAULT_FIND_SHORTCUT),
+  );
+}
+
 function isPointInsideSelection(
   container: EmbedPdfContainer | null,
   x: number,
@@ -793,8 +971,288 @@ function isPointInsideSelection(
   });
 }
 
+function getPdfScrollContainer(
+  container: EmbedPdfContainer | null,
+): HTMLElement | null {
+  const root = container?.shadowRoot;
+  if (!root) return null;
+
+  const divs = root.querySelectorAll<HTMLElement>("div");
+  for (const div of divs) {
+    const style = getComputedStyle(div);
+    if (
+      (style.overflowY === "auto" || style.overflowY === "scroll") &&
+      div.scrollHeight > div.clientHeight
+    ) {
+      return div;
+    }
+  }
+
+  return null;
+}
+
+function getPdfContentWrapper(
+  container: EmbedPdfContainer | null,
+): HTMLElement | null {
+  const scrollContainer = getPdfScrollContainer(container);
+  if (!scrollContainer) return null;
+
+  const divs = scrollContainer.querySelectorAll<HTMLElement>("div");
+  for (const div of divs) {
+    const style = getComputedStyle(div);
+    if (
+      style.position === "relative" &&
+      div.offsetHeight > scrollContainer.clientHeight
+    ) {
+      return div;
+    }
+  }
+
+  return null;
+}
+
+function isPointInsideSelectionFromLayout(
+  registry: PluginRegistry | null,
+  container: EmbedPdfContainer | null,
+  x: number,
+  y: number,
+) {
+  const selectionCapability = getSelectionCapability(registry);
+  const selection = selectionCapability?.getState().selection;
+  const layoutProvider = getScrollCapability(registry);
+  const contentWrapper = getPdfContentWrapper(container);
+  if (!selection || !layoutProvider || !contentWrapper) return false;
+
+  const wrapperRect = contentWrapper.getBoundingClientRect();
+  const startPage = Math.min(selection.start.page, selection.end.page);
+  const endPage = Math.max(selection.start.page, selection.end.page);
+  const tolerance = 4;
+
+  for (let page = startPage; page <= endPage; page += 1) {
+    const rects = selectionCapability.getHighlightRectsForPage(page);
+    for (const selectionRect of rects) {
+      const position = layoutProvider.getRectPositionForPage(
+        page,
+        selectionRect,
+      );
+      if (!position) continue;
+
+      const left = wrapperRect.left + position.origin.x;
+      const top = wrapperRect.top + position.origin.y;
+      const right = left + position.size.width;
+      const bottom = top + position.size.height;
+
+      if (
+        x >= left - tolerance &&
+        x <= right + tolerance &&
+        y >= top - tolerance &&
+        y <= bottom + tolerance
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isPointInsideSelectionAnchor(
+  registry: PluginRegistry | null,
+  container: EmbedPdfContainer | null,
+  anchor: GlossAnnotationAnchor,
+  x: number,
+  y: number,
+) {
+  const layoutProvider = getScrollCapability(registry);
+  const contentWrapper = getPdfContentWrapper(container);
+  if (!layoutProvider || !contentWrapper) return false;
+
+  const wrapperRect = contentWrapper.getBoundingClientRect();
+  const rects = anchor.rects.length ? anchor.rects : [anchor.rect];
+  const tolerance = 6;
+
+  return rects.some((selectionRect) => {
+    const position = layoutProvider.getRectPositionForPage(
+      anchor.page,
+      selectionRect,
+    );
+    if (!position) return false;
+
+    const left = wrapperRect.left + position.origin.x;
+    const top = wrapperRect.top + position.origin.y;
+    const right = left + position.size.width;
+    const bottom = top + position.size.height;
+
+    return (
+      x >= left - tolerance &&
+      x <= right + tolerance &&
+      y >= top - tolerance &&
+      y <= bottom + tolerance
+    );
+  });
+}
+
 function isContextMenuPointerEvent(event: MouseEvent | PointerEvent) {
   return event.button === 2 || (event.button === 0 && event.ctrlKey);
+}
+
+function isPointerInsidePdfSelection(
+  registry: PluginRegistry | null,
+  container: EmbedPdfContainer | null,
+  event: MouseEvent | PointerEvent,
+) {
+  return (
+    hasTextSelection(registry) &&
+    (isPointInsideSelection(container, event.clientX, event.clientY) ||
+      isPointInsideSelectionFromLayout(
+        registry,
+        container,
+        event.clientX,
+        event.clientY,
+      ))
+  );
+}
+
+function createSelectionContextSnapshotFromRequest(
+  request: SelectedGlossRequest | null,
+  registry: PluginRegistry | null,
+  container: EmbedPdfContainer | null,
+  event: MouseEvent | PointerEvent,
+): SelectionContextSnapshot | null {
+  if (!request) return null;
+  if (
+    !isPointInsideSelectionAnchor(
+      registry,
+      container,
+      request.anchor,
+      event.clientX,
+      event.clientY,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    createdAt: performance.now(),
+    pointerX: event.clientX,
+    pointerY: event.clientY,
+    insideSelection: true,
+    request,
+    pendingRequest: Promise.resolve(request),
+  };
+}
+
+function createSelectionContextSnapshot(
+  registry: PluginRegistry | null,
+  container: EmbedPdfContainer | null,
+  event: MouseEvent | PointerEvent,
+  fallbackRequest?: SelectedGlossRequest | null,
+): SelectionContextSnapshot | null {
+  const insideSelection = isPointerInsidePdfSelection(registry, container, event);
+  if (!insideSelection) {
+    return createSelectionContextSnapshotFromRequest(
+      fallbackRequest ?? null,
+      registry,
+      container,
+      event,
+    );
+  }
+
+  const snapshot: SelectionContextSnapshot = {
+    createdAt: performance.now(),
+    pointerX: event.clientX,
+    pointerY: event.clientY,
+    insideSelection,
+  };
+
+  snapshot.pendingRequest = getSelectedGlossRequest(registry)
+    .then((request) => {
+      snapshot.request = request;
+      return request;
+    })
+    .catch(() => null);
+
+  return snapshot;
+}
+
+function restorePdfSelectionFromRequest(
+  registry: PluginRegistry | null,
+  request: SelectedGlossRequest,
+) {
+  try {
+    const selectionPlugin = registry?.getPlugin("selection") as
+      | SelectionPluginLike
+      | null;
+    const documentId = selectionPlugin?.coreState.core.activeDocumentId;
+    if (!selectionPlugin || !documentId) return false;
+
+    const selectionRange: SelectionRange = {
+      start: {
+        page: request.anchor.page,
+        index: request.anchor.startIndex,
+      },
+      end: {
+        page: request.anchor.page,
+        index: request.anchor.endIndex,
+      },
+    };
+
+    if (
+      rangeEquals(
+        selectionPlugin.getDocumentState(documentId).selection,
+        selectionRange,
+      )
+    ) {
+      return true;
+    }
+
+    selectionPlugin.applyInstantSelection(
+      documentId,
+      request.anchor.page,
+      request.anchor.startIndex,
+      request.anchor.endIndex,
+      DEFAULT_PDF_INTERACTION_MODE,
+    );
+    return true;
+  } catch (error) {
+    console.error("Failed to restore PDF selection:", error);
+    return false;
+  }
+}
+
+function getMatchingSelectionContextSnapshot(
+  snapshot: SelectionContextSnapshot | null,
+  event: MouseEvent,
+) {
+  if (!snapshot?.insideSelection) return null;
+
+  const age = performance.now() - snapshot.createdAt;
+  const dx = Math.abs(event.clientX - snapshot.pointerX);
+  const dy = Math.abs(event.clientY - snapshot.pointerY);
+
+  if (
+    age > SELECTION_CONTEXT_SNAPSHOT_MAX_AGE ||
+    dx > SELECTION_CONTEXT_SNAPSHOT_MAX_DISTANCE ||
+    dy > SELECTION_CONTEXT_SNAPSHOT_MAX_DISTANCE
+  ) {
+    return null;
+  }
+
+  return snapshot;
+}
+
+function resolveSelectionContextRequest(
+  snapshot: SelectionContextSnapshot | null,
+  registry: PluginRegistry | null,
+) {
+  if (snapshot?.request) return Promise.resolve(snapshot.request);
+  if (snapshot?.pendingRequest) return snapshot.pendingRequest;
+
+  return getSelectedGlossRequest(registry).catch(() => null);
+}
+
+function isRecentSelectionRequest(createdAt: number) {
+  return performance.now() - createdAt <= RECENT_SELECTION_REQUEST_MAX_AGE;
 }
 
 function applySelectionColorOverride(container: EmbedPdfContainer | null) {
@@ -854,6 +1312,10 @@ function App() {
   const renderAnnotationTimeoutsRef = useRef<number[]>([]);
   const registryRef = useRef<PluginRegistry | null>(null);
   const embedPdfContainerRef = useRef<EmbedPdfContainer | null>(null);
+  const selectionContextSnapshotRef =
+    useRef<SelectionContextSnapshot | null>(null);
+  const lastSelectionRequestRef = useRef<SelectedGlossRequest | null>(null);
+  const lastSelectionRequestAtRef = useRef(0);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1132,13 +1594,32 @@ function App() {
     };
   }, []);
 
+  const prevActiveDocumentIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const prevId = prevActiveDocumentIdRef.current;
+    const nextId = activeDocument?.id ?? null;
+    prevActiveDocumentIdRef.current = nextId;
+
+    if (prevId === nextId) return;
+
     clearAnnotations(embedPdfContainerRef.current);
-    registryRef.current = null;
-    embedPdfContainerRef.current = null;
+    selectionContextSnapshotRef.current = null;
+    lastSelectionRequestRef.current = null;
+    lastSelectionRequestAtRef.current = 0;
     setContextMenu(null);
     setSelectedAnnotationId(null);
     setSelectedTranslationId(null);
+
+    // Do NOT clear embedPdfContainerRef here when a document is active.
+    // onInit runs synchronously during the child PDFViewer's mount effect,
+    // which fires BEFORE this parent effect, so nulling the container ref
+    // here would clobber the freshly-initialised viewer and leave annotation
+    // rendering with no shadow root to target. The ref is owned by
+    // onInit/onReady and only needs clearing once no document remains.
+    registryRef.current = null;
+    if (!activeDocument) {
+      embedPdfContainerRef.current = null;
+    }
 
     if (activeDocument && !annotationsRef.current.has(activeDocument.id)) {
       annotationsRef.current.set(
@@ -1155,6 +1636,56 @@ function App() {
       setTranslationRevision((revision) => revision + 1);
     }
   }, [activeDocument]);
+
+  useEffect(() => {
+    if (!activeDocument || viewerReadyRevision === 0) return;
+
+    const selectionCapability = getSelectionCapability(registryRef.current);
+    if (!selectionCapability?.onSelectionChange) return;
+
+    let disposed = false;
+    let cacheRevision = 0;
+    const cacheCurrentSelection = () => {
+      let selection: SelectionRange | null = null;
+      try {
+        selection = selectionCapability.getState().selection;
+      } catch {
+        return;
+      }
+      if (!selection) return;
+
+      const revision = ++cacheRevision;
+      const readRequest = () => {
+        if (disposed || revision !== cacheRevision) return;
+
+        void getSelectedGlossRequest(registryRef.current)
+          .then((request) => {
+            if (disposed || revision !== cacheRevision) return;
+            lastSelectionRequestRef.current = request;
+            lastSelectionRequestAtRef.current = performance.now();
+          })
+          .catch(() => {
+            // The selection plugin can finish rect/text slices a tick after the event.
+          });
+      };
+
+      readRequest();
+      window.setTimeout(readRequest, 50);
+    };
+
+    cacheCurrentSelection();
+    const unsubscribe = selectionCapability.onSelectionChange((event) => {
+      if (event.selection) {
+        cacheCurrentSelection();
+      }
+    });
+
+    return () => {
+      disposed = true;
+      cacheRevision += 1;
+      unsubscribe();
+    };
+  }, [activeDocument, viewerReadyRevision]);
 
   useEffect(() => {
     if (!activeDocument || viewerReadyRevision === 0) return;
@@ -1255,17 +1786,58 @@ function App() {
   useEffect(() => {
     const stopContextMenuPointerDown = (event: MouseEvent | PointerEvent) => {
       if (!isContextMenuPointerEvent(event)) return;
+
+      if (event.type === "pointerdown") {
+        suppressPdfSelectionClearForContextPointerDown();
+      }
+
+      const nextSnapshot = createSelectionContextSnapshot(
+        registryRef.current,
+        embedPdfContainerRef.current,
+        event,
+        isRecentSelectionRequest(lastSelectionRequestAtRef.current)
+          ? lastSelectionRequestRef.current
+          : null,
+      );
+      if (nextSnapshot) {
+        selectionContextSnapshotRef.current = nextSnapshot;
+      } else if (
+        event.type !== "mousedown" ||
+        !getMatchingSelectionContextSnapshot(
+          selectionContextSnapshotRef.current,
+          event,
+        )
+      ) {
+        selectionContextSnapshotRef.current = null;
+      }
+
       event.stopPropagation();
+      event.stopImmediatePropagation();
     };
 
     const handleContextMenu = (event: MouseEvent) => {
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
 
       const selectionCapability = getSelectionCapability(registryRef.current);
       const annotationTarget = getAnnotationContextTarget(event);
+      const selectionSnapshot =
+        getMatchingSelectionContextSnapshot(
+          selectionContextSnapshotRef.current,
+          event,
+        ) ??
+        createSelectionContextSnapshotFromRequest(
+          isRecentSelectionRequest(lastSelectionRequestAtRef.current)
+            ? lastSelectionRequestRef.current
+            : null,
+          registryRef.current,
+          embedPdfContainerRef.current,
+          event,
+        );
 
       if (annotationTarget) {
+        selectionContextSnapshotRef.current = null;
         selectionCapability?.clear();
         if (annotationTarget.kind === "gloss") {
           setSelectedAnnotationId(annotationTarget.id);
@@ -1290,27 +1862,83 @@ function App() {
 
       const hasSelection = hasTextSelection(registryRef.current);
       const clickedInsideSelection =
-        hasSelection &&
-        isPointInsideSelection(
+        Boolean(selectionSnapshot) ||
+        hasSelection ||
+        isPointerInsidePdfSelection(
+          registryRef.current,
           embedPdfContainerRef.current,
-          event.clientX,
-          event.clientY,
+          event,
         );
 
-      if (hasSelection && !clickedInsideSelection) {
-        selectionCapability?.clear();
+      if (!hasSelection && selectionSnapshot?.request) {
+        restorePdfSelectionFromRequest(
+          registryRef.current,
+          selectionSnapshot.request,
+        );
       }
+
+      const menuPosition = clampContextMenuPosition(
+        event.clientX,
+        event.clientY,
+        SELECTION_CONTEXT_MENU_WIDTH,
+        SELECTION_CONTEXT_MENU_HEIGHT,
+      );
 
       setContextMenu({
         type: "selection",
-        ...clampContextMenuPosition(
-          event.clientX,
-          event.clientY,
-          SELECTION_CONTEXT_MENU_WIDTH,
-          SELECTION_CONTEXT_MENU_HEIGHT,
-        ),
+        ...menuPosition,
         canCopy: clickedInsideSelection,
+        request: selectionSnapshot?.request,
       });
+
+      if (!clickedInsideSelection) {
+        selectionContextSnapshotRef.current = null;
+        return;
+      }
+
+      void resolveSelectionContextRequest(
+        selectionSnapshot,
+        registryRef.current,
+      )
+        .then((request) => {
+          setContextMenu((currentMenu) => {
+            if (
+              currentMenu?.type !== "selection" ||
+              currentMenu.x !== menuPosition.x ||
+              currentMenu.y !== menuPosition.y
+            ) {
+              return currentMenu;
+            }
+
+            if (!request) {
+              return { ...currentMenu, canCopy: false, request: undefined };
+            }
+            lastSelectionRequestRef.current = request;
+            lastSelectionRequestAtRef.current = performance.now();
+            if (!hasTextSelection(registryRef.current)) {
+              restorePdfSelectionFromRequest(registryRef.current, request);
+            }
+
+            return {
+              ...currentMenu,
+              canCopy: true,
+              request,
+            };
+          });
+        })
+        .catch(() => {
+          setContextMenu((currentMenu) => {
+            if (
+              currentMenu?.type !== "selection" ||
+              currentMenu.x !== menuPosition.x ||
+              currentMenu.y !== menuPosition.y
+            ) {
+              return currentMenu;
+            }
+
+            return { ...currentMenu, canCopy: false, request: undefined };
+          });
+        });
     };
 
     const handleCopyShortcut = (event: KeyboardEvent) => {
@@ -1328,32 +1956,32 @@ function App() {
       copySelectedPdfText(registryRef.current);
     };
 
-    window.document.addEventListener(
+    window.addEventListener(
       "pointerdown",
       stopContextMenuPointerDown,
       true,
     );
-    window.document.addEventListener(
+    window.addEventListener(
       "mousedown",
       stopContextMenuPointerDown,
       true,
     );
     window.document.addEventListener("keydown", handleCopyShortcut, true);
-    window.document.addEventListener("contextmenu", handleContextMenu, true);
+    window.addEventListener("contextmenu", handleContextMenu, true);
 
     return () => {
-      window.document.removeEventListener(
+      window.removeEventListener(
         "pointerdown",
         stopContextMenuPointerDown,
         true,
       );
-      window.document.removeEventListener(
+      window.removeEventListener(
         "mousedown",
         stopContextMenuPointerDown,
         true,
       );
       window.document.removeEventListener("keydown", handleCopyShortcut, true);
-      window.document.removeEventListener("contextmenu", handleContextMenu, true);
+      window.removeEventListener("contextmenu", handleContextMenu, true);
     };
   }, []);
 
@@ -1369,15 +1997,20 @@ function App() {
         return;
       }
 
+      selectionContextSnapshotRef.current = null;
       setContextMenu(null);
     };
 
     const closeContextMenuFromScroll = () => {
+      selectionContextSnapshotRef.current = null;
       setContextMenu(null);
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setContextMenu(null);
+      if (event.key === "Escape") {
+        selectionContextSnapshotRef.current = null;
+        setContextMenu(null);
+      }
     };
 
     window.document.addEventListener("pointerdown", closeContextMenu);
@@ -1550,14 +2183,28 @@ function App() {
   const handleViewerReady = useCallback((registry: PluginRegistry) => {
     registryRef.current = registry;
     patchSelectionWordBoundary(registry);
+    patchSelectionContextMenuClear(registry);
+    patchPdfFindShortcut(registry, settings.shortcuts.find);
     setViewerReadyRevision((revision) => revision + 1);
     scheduleRenderActiveAnnotations();
-  }, [scheduleRenderActiveAnnotations]);
+  }, [scheduleRenderActiveAnnotations, settings.shortcuts.find]);
+
+  useEffect(() => {
+    if (viewerReadyRevision === 0) return;
+    patchPdfFindShortcut(registryRef.current, settings.shortcuts.find);
+  }, [settings.shortcuts.find, viewerReadyRevision]);
 
   const handleCopySelection = useCallback(() => {
     if (contextMenu?.type !== "selection" || !contextMenu.canCopy) return;
 
-    copySelectedPdfText(registryRef.current);
+    if (contextMenu.request?.text) {
+      void writeTextToClipboard(contextMenu.request.text).catch((error) => {
+        console.error("Failed to write selected text to clipboard:", error);
+      });
+    } else {
+      copySelectedPdfText(registryRef.current);
+    }
+    selectionContextSnapshotRef.current = null;
     setContextMenu(null);
   }, [contextMenu]);
 
@@ -1581,6 +2228,7 @@ function App() {
       );
     }
 
+    selectionContextSnapshotRef.current = null;
     setContextMenu(null);
     window.requestAnimationFrame(renderActiveAnnotations);
   }, [
@@ -1594,6 +2242,7 @@ function App() {
     if (!activeDocument || contextMenu?.type !== "annotation") return;
 
     const { target } = contextMenu;
+    selectionContextSnapshotRef.current = null;
     setContextMenu(null);
 
     if (target.kind === "gloss") {
@@ -1868,16 +2517,31 @@ function App() {
   }, []);
 
   const handleGlossWord = useCallback(
-    async () => {
+    async (selectionRequest?: SelectedGlossRequest) => {
+      selectionContextSnapshotRef.current = null;
       setContextMenu(null);
       if (!activeDocument) return;
 
       let request: SelectedGlossRequest;
-      try {
-        request = await getSelectedGlossRequest(registryRef.current);
-      } catch {
-        return;
+      if (selectionRequest) {
+        request = selectionRequest;
+      } else {
+        try {
+          request = await getSelectedGlossRequest(registryRef.current);
+        } catch {
+          const cachedRequest = lastSelectionRequestRef.current;
+          if (
+            !cachedRequest ||
+            !isRecentSelectionRequest(lastSelectionRequestAtRef.current)
+          ) {
+            return;
+          }
+          request = cachedRequest;
+        }
       }
+
+      lastSelectionRequestRef.current = request;
+      lastSelectionRequestAtRef.current = performance.now();
 
       const selectedText = request.text.replace(/\s+/g, " ").trim();
       if (!selectedText) return;
@@ -1986,32 +2650,72 @@ function App() {
 
   const handleGlossFromContextMenu = useCallback(() => {
     if (contextMenu?.type !== "selection") return;
-    void handleGlossWord();
+    void handleGlossWord(contextMenu.request);
   }, [contextMenu, handleGlossWord]);
 
   useEffect(() => {
     const handleGlossShortcut = (event: KeyboardEvent) => {
-      if (
-        event.key !== "d" ||
-        !(event.metaKey || event.ctrlKey) ||
-        isEditableEventTarget(event) ||
+      const hasSelectionForGloss =
+        hasTextSelection(registryRef.current) ||
         hasNativeTextSelection(embedPdfContainerRef.current) ||
-        !hasTextSelection(registryRef.current)
+        (Boolean(lastSelectionRequestRef.current) &&
+          isRecentSelectionRequest(lastSelectionRequestAtRef.current));
+
+      if (
+        !isKeyboardShortcut(
+          event,
+          getConfiguredShortcut(settings.shortcuts.gloss, DEFAULT_GLOSS_SHORTCUT),
+        ) ||
+        isEditableEventTarget(event) ||
+        !hasSelectionForGloss
       ) {
         return;
       }
 
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
       void handleGlossWord();
     };
 
-    window.document.addEventListener("keydown", handleGlossShortcut, true);
+    window.addEventListener("keydown", handleGlossShortcut, true);
 
     return () => {
-      window.document.removeEventListener("keydown", handleGlossShortcut, true);
+      window.removeEventListener("keydown", handleGlossShortcut, true);
     };
-  }, [handleGlossWord]);
+  }, [handleGlossWord, settings.shortcuts.gloss]);
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if (
+        isEditableEventTarget(event) ||
+        !isFindKeyboardShortcut(event, settings.shortcuts.find)
+      ) {
+        return;
+      }
+
+      const commands = getCommandsCapability(registryRef.current);
+      if (!commands) return;
+
+      try {
+        const command = commands.resolve(PDF_FIND_COMMAND_ID);
+        if (command.disabled || !command.visible) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        commands.execute(PDF_FIND_COMMAND_ID, undefined, "keyboard");
+      } catch {
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handleFindShortcut, true);
+
+    return () => {
+      window.removeEventListener("keydown", handleFindShortcut, true);
+    };
+  }, [settings.shortcuts.find]);
 
   const annotationContextStyle = (() => {
     if (contextMenu?.type !== "annotation" || !activeDocument) return null;
@@ -2277,7 +2981,9 @@ function App() {
             type="button"
           >
             释义
-            <span className="app-context-menu-shortcut">⌘D</span>
+            <span className="app-context-menu-shortcut">
+              {formatKeyboardShortcutLabel(settings.shortcuts.gloss)}
+            </span>
           </button>
         </div>
       )}

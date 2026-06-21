@@ -31,7 +31,7 @@ export interface UpdateState {
 
 const DEFAULT_APP_INFO: AppInfo = {
   name: "GlossReader",
-  version: "1.0.0",
+  version: "1.0.1",
 };
 
 function normalizeAppName(name: string) {

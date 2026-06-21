@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   Settings as SettingsType,
   MODEL_OPTIONS,
@@ -7,6 +7,13 @@ import {
   DEFAULT_GLOSS_PROMPT_TEMPLATE,
   DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
 } from '../lib/settings';
+import {
+  DEFAULT_FIND_SHORTCUT,
+  DEFAULT_GLOSS_SHORTCUT,
+  formatKeyboardShortcutLabel,
+  keyboardEventToShortcut,
+  normalizeKeyboardShortcut,
+} from '../lib/keyboardShortcuts';
 import {
   checkAndInstallUpdate,
   GITHUB_REPOSITORY_URL,
@@ -17,7 +24,7 @@ import {
 } from '../lib/updater';
 import './Settings.css';
 
-type SettingsTab = 'ai' | 'display' | 'vocabulary' | 'about';
+type SettingsTab = 'ai' | 'display' | 'shortcuts' | 'vocabulary' | 'about';
 
 interface SettingsProps {
   settings: SettingsType;
@@ -68,12 +75,47 @@ const COLOR_OPTIONS = [
   { label: '黑色', value: 'black', color: '#1f2328' },
 ];
 
+interface ShortcutInputProps {
+  value: string;
+  onChange: (shortcut: string) => void;
+}
+
+function ShortcutInput({ value, onChange }: ShortcutInputProps) {
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Tab') return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.key === 'Escape') {
+      event.currentTarget.blur();
+      return;
+    }
+
+    const shortcut = keyboardEventToShortcut(event.nativeEvent);
+    if (!shortcut) return;
+
+    onChange(shortcut);
+    event.currentTarget.blur();
+  }
+
+  return (
+    <input
+      className="settings-shortcut-input"
+      value={formatKeyboardShortcutLabel(value)}
+      onFocus={(event) => event.currentTarget.select()}
+      onKeyDown={handleKeyDown}
+      readOnly
+    />
+  );
+}
+
 export default function Settings({ settings, onSettingsChange, onClose }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('ai');
   const [showApiKey, setShowApiKey] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo>({
     name: 'GlossReader',
-    version: '1.0.0',
+    version: '1.0.1',
   });
   const [updateState, setUpdateState] = useState<UpdateState>({
     status: 'idle',
@@ -84,6 +126,9 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
     updateState.status === 'downloading' ||
     updateState.status === 'installing' ||
     updateState.status === 'restarting';
+  const shortcutConflict =
+    normalizeKeyboardShortcut(settings.shortcuts.gloss) ===
+    normalizeKeyboardShortcut(settings.shortcuts.find);
 
   useEffect(() => {
     let cancelled = false;
@@ -154,6 +199,16 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
               <path d="M17 14l3 3-3 3" />
             </svg>
             显示
+          </button>
+          <button className={`settings-nav-item ${activeTab === 'shortcuts' ? 'active' : ''}`} onClick={() => setActiveTab('shortcuts')}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <path d="M7 9h.01" />
+              <path d="M11 9h.01" />
+              <path d="M15 9h.01" />
+              <path d="M7 13h10" />
+            </svg>
+            快捷键
           </button>
           <button className={`settings-nav-item ${activeTab === 'vocabulary' ? 'active' : ''}`} onClick={() => setActiveTab('vocabulary')}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -511,6 +566,56 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
                   </select>
                 </div>
               </div>
+            </>
+          )}
+
+          {activeTab === 'shortcuts' && (
+            <>
+              <h2 className="settings-section-title">快捷键</h2>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">生成释义</div>
+                  <div className="settings-desc">选中单词、词组或句子后触发释义</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.gloss}
+                    onChange={(shortcut) => update('shortcuts', 'gloss', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'gloss', DEFAULT_GLOSS_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">查找</div>
+                  <div className="settings-desc">打开 PDF 查找侧边栏</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.find}
+                    onChange={(shortcut) => update('shortcuts', 'find', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'find', DEFAULT_FIND_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              {shortcutConflict && (
+                <div className="settings-shortcut-warning">
+                  释义和查找正在使用同一个快捷键。选中文本时释义会优先触发。
+                </div>
+              )}
             </>
           )}
 

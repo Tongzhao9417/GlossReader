@@ -1,3 +1,8 @@
+import {
+  DEFAULT_FIND_SHORTCUT,
+  DEFAULT_GLOSS_SHORTCUT,
+} from './keyboardShortcuts';
+
 export interface Settings {
   ai: {
     provider: 'anthropic' | 'openai' | 'deepseek' | 'ollama';
@@ -18,6 +23,10 @@ export interface Settings {
     translationFontSize: string;
     translationColor: string;
     translationOpacity: string;
+  };
+  shortcuts: {
+    gloss: string;
+    find: string;
   };
 }
 
@@ -101,6 +110,10 @@ export function createDefaultSettings(): Settings {
       translationColor: 'red',
       translationOpacity: '100',
     },
+    shortcuts: {
+      gloss: DEFAULT_GLOSS_SHORTCUT,
+      find: DEFAULT_FIND_SHORTCUT,
+    },
   };
 }
 
@@ -120,6 +133,7 @@ export function loadSettings(): Settings {
           language: parsed.glossing?.language ?? defaults.glossing.language,
         },
         display: { ...defaults.display, ...parsed.display },
+        shortcuts: { ...defaults.shortcuts, ...parsed.shortcuts },
       };
     }
   } catch {

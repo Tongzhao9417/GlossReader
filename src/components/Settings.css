@@ -335,6 +335,49 @@
   border-color: #cfcfcf;
 }
 
+.settings-action-btn.compact {
+  min-width: 64px;
+  padding: 8px 12px;
+}
+
+.settings-shortcut-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-shortcut-input {
+  width: 128px;
+  padding: 8px 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2328;
+  outline: none;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.settings-shortcut-input:focus {
+  border-color: #999;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.06);
+}
+
+.settings-shortcut-warning {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #ead8a5;
+  border-radius: 8px;
+  background: #fffaf0;
+  color: #7a5a15;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 /* Button group */
 
 .settings-btn-group {
