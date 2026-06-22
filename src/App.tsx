@@ -38,6 +38,7 @@ import {
   normalizeKeyboardShortcut,
 } from "./lib/keyboardShortcuts";
 import { fetchGloss, fetchTranslation } from "./lib/aiService";
+import { getWordForms } from "./lib/inflection";
 import {
   checkForUpdate,
   downloadAndInstallUpdate,
@@ -178,6 +179,11 @@ const TRANSLATIONS_STORAGE_KEY = "glossreader-side-translations";
 const INLINE_GLOSS_MAX_WORDS = 5;
 const INLINE_GLOSS_MAX_CHARS = 48;
 const RECENT_SELECTION_REQUEST_MAX_AGE = 5000;
+// MatchFlag.MatchWholeWord (2). Omitting MatchCase (1) keeps matching
+// case-insensitive so "Power" at a sentence start still matches "power".
+const MATCH_WHOLE_WORD = 2;
+// Safety cap so glossing a very frequent word can't flood the page with overlays.
+const MAX_AUTO_GLOSS_OCCURRENCES = 200;
 
 interface OpenDocument {
   id: string;
@@ -210,6 +216,18 @@ interface PdfTask<T> {
   ) => void;
 }
 
+interface PdfSearchResultLike {
+  pageIndex: number;
+  charIndex: number;
+  charCount: number;
+  rects: PdfRectLike[];
+}
+
+interface PdfSearchAllPagesResultLike {
+  results: PdfSearchResultLike[];
+  total: number;
+}
+
 interface SelectionPluginLike {
   __glossReaderWordBoundaryPatch?: boolean;
   __glossReaderContextMenuClearPatch?: boolean;
@@ -230,6 +248,16 @@ interface SelectionPluginLike {
     ) => {
       wait: (
         onResolve: (texts: string[]) => void,
+        onReject?: (error: unknown) => void,
+      ) => void;
+    };
+    searchAllPages?: (
+      doc: unknown,
+      keyword: string,
+      options?: { flags?: number[] },
+    ) => {
+      wait: (
+        onResolve: (result: PdfSearchAllPagesResultLike) => void,
         onReject?: (error: unknown) => void,
       ) => void;
     };
@@ -1054,6 +1082,119 @@ function getSelectedGlossRequest(
   });
 }
 
+// A gloss fans out across the document only for a single bare word — phrases
+// already route to side-translation, and whole-word search is meant for tokens.
+function isSingleWordGloss(text: string) {
+  return text.length >= 2 && !/\s/.test(text);
+}
+
+function unionRect(rects: PdfRectLike[]): PdfRectLike {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const rect of rects) {
+    minX = Math.min(minX, rect.origin.x);
+    minY = Math.min(minY, rect.origin.y);
+    maxX = Math.max(maxX, rect.origin.x + rect.size.width);
+    maxY = Math.max(maxY, rect.origin.y + rect.size.height);
+  }
+
+  return {
+    origin: { x: minX, y: minY },
+    size: { width: maxX - minX, height: maxY - minY },
+  };
+}
+
+function searchResultToAnchor(
+  result: PdfSearchResultLike,
+): GlossAnnotationAnchor | null {
+  const rects = result.rects ?? [];
+  if (!rects.length) return null;
+
+  return {
+    page: result.pageIndex,
+    startIndex: result.charIndex,
+    // end.index is the inclusive index of the last matched character, matching
+    // the convention used by the selection-derived anchor.
+    endIndex: result.charIndex + result.charCount - 1,
+    rect: unionRect(rects),
+    rects,
+  };
+}
+
+// Headlessly searches every page for a single keyword (whole-word,
+// case-insensitive) using the PDF engine directly, so it never opens the visible
+// find panel.
+function searchKeyword(
+  selectionPlugin: SelectionPluginLike,
+  doc: unknown,
+  keyword: string,
+): Promise<GlossAnnotationAnchor[]> {
+  return new Promise((resolve) => {
+    try {
+      selectionPlugin.engine.searchAllPages!(doc, keyword, {
+        flags: [MATCH_WHOLE_WORD],
+      }).wait(
+        (result) => {
+          const anchors: GlossAnnotationAnchor[] = [];
+          for (const hit of result.results ?? []) {
+            const anchor = searchResultToAnchor(hit);
+            if (anchor) anchors.push(anchor);
+          }
+          resolve(anchors);
+        },
+        () => resolve([]),
+      );
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+// Returns one anchor per occurrence of `word` across the document, including its
+// singular/plural noun form(s). Other occurrences are deduped by position.
+async function findWordOccurrences(
+  registry: PluginRegistry | null,
+  word: string,
+): Promise<GlossAnnotationAnchor[]> {
+  const selectionPlugin = registry?.getPlugin(
+    "selection",
+  ) as SelectionPluginLike | null;
+
+  const documentId = selectionPlugin?.coreState.core.activeDocumentId;
+  const doc = documentId
+    ? selectionPlugin?.coreState.core.documents[documentId]?.document
+    : null;
+
+  if (
+    !selectionPlugin ||
+    !doc ||
+    typeof selectionPlugin.engine.searchAllPages !== "function"
+  ) {
+    return [];
+  }
+
+  const forms = getWordForms(word);
+  const perForm = await Promise.all(
+    forms.map((form) => searchKeyword(selectionPlugin, doc, form)),
+  );
+
+  const merged: GlossAnnotationAnchor[] = [];
+  const seen = new Set<string>();
+  for (const anchors of perForm) {
+    for (const anchor of anchors) {
+      const key = `${anchor.page}:${anchor.startIndex}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(anchor);
+    }
+  }
+
+  return merged;
+}
+
 function isEditableEventTarget(event: Event) {
   const target = event.composedPath()[0] ?? event.target;
 
@@ -1707,11 +1848,17 @@ function App() {
           setSelectedTranslationId(null);
         },
         onEdit: (id, definition) => {
-          updateActiveDocumentAnnotations((currentAnnotations) =>
-            currentAnnotations.map((annotation) =>
-              annotation.id === id ? { ...annotation, definition } : annotation,
-            ),
-          );
+          updateActiveDocumentAnnotations((currentAnnotations) => {
+            const groupId = currentAnnotations.find(
+              (annotation) => annotation.id === id,
+            )?.groupId;
+            return currentAnnotations.map((annotation) =>
+              annotation.id === id ||
+              (!!groupId && annotation.groupId === groupId)
+                ? { ...annotation, definition }
+                : annotation,
+            );
+          });
           window.requestAnimationFrame(renderActiveAnnotations);
         },
         onMove: (id, delta, currentScale) => {
@@ -2631,6 +2778,41 @@ function App() {
     updateActiveDocumentTranslations,
   ]);
 
+  const handleCollapseGlossGroup = useCallback(() => {
+    if (
+      !activeDocument ||
+      contextMenu?.type !== "annotation" ||
+      contextMenu.target.kind !== "gloss"
+    ) {
+      return;
+    }
+
+    const targetId = contextMenu.target.id;
+    const annotations = annotationsRef.current.get(activeDocument.id) ?? [];
+    const groupId = annotations.find((item) => item.id === targetId)?.groupId;
+
+    selectionContextSnapshotRef.current = null;
+    setContextMenu(null);
+    if (!groupId) return;
+
+    // Keep the clicked occurrence (detached into a standalone gloss) and drop
+    // every other member of the group.
+    updateActiveDocumentAnnotations((currentAnnotations) =>
+      currentAnnotations
+        .filter((item) => item.id === targetId || item.groupId !== groupId)
+        .map((item) =>
+          item.id === targetId ? { ...item, groupId: undefined } : item,
+        ),
+    );
+    setSelectedAnnotationId(targetId);
+    window.requestAnimationFrame(renderActiveAnnotations);
+  }, [
+    activeDocument,
+    contextMenu,
+    renderActiveAnnotations,
+    updateActiveDocumentAnnotations,
+  ]);
+
   const handleReloadContextAnnotation = useCallback(() => {
     if (!activeDocument || contextMenu?.type !== "annotation") return;
 
@@ -2643,9 +2825,13 @@ function App() {
       const annotation = annotations.find((item) => item.id === target.id);
       if (!annotation?.sourceText) return;
 
+      const groupId = annotation.groupId;
+      const inGroup = (item: GlossAnnotation) =>
+        item.id === target.id || (!!groupId && item.groupId === groupId);
+
       updateActiveDocumentAnnotations((currentAnnotations) =>
         currentAnnotations.map((item) =>
-          item.id === target.id ? { ...item, definition: "..." } : item,
+          inGroup(item) ? { ...item, definition: "..." } : item,
         ),
       );
       window.requestAnimationFrame(renderActiveAnnotations);
@@ -2654,7 +2840,7 @@ function App() {
         .then((result) => {
           updateActiveDocumentAnnotations((currentAnnotations) =>
             currentAnnotations.map((item) =>
-              item.id === target.id
+              inGroup(item)
                 ? { ...item, definition: result.definition }
                 : item,
             ),
@@ -2664,7 +2850,7 @@ function App() {
         .catch(() => {
           updateActiveDocumentAnnotations((currentAnnotations) =>
             currentAnnotations.map((item) =>
-              item.id === target.id ? { ...item, definition: "✗" } : item,
+              inGroup(item) ? { ...item, definition: "✗" } : item,
             ),
           );
           window.requestAnimationFrame(renderActiveAnnotations);
@@ -2988,9 +3174,15 @@ function App() {
         return;
       }
 
+      const willFanOut =
+        settings.glossing.autoGlossAllOccurrences &&
+        isSingleWordGloss(selectedText);
+      const groupId = willFanOut ? createGlossAnnotationId() : undefined;
+
       const annotationId = createGlossAnnotationId();
       const pendingAnnotation: GlossAnnotation = {
         id: annotationId,
+        groupId,
         sourceText: selectedText,
         definition: "...",
         anchor: request.anchor,
@@ -3019,6 +3211,43 @@ function App() {
           ),
         );
         scheduleRenderActiveAnnotations();
+
+        if (willFanOut && groupId) {
+          const occurrences = await findWordOccurrences(
+            registryRef.current,
+            selectedText,
+          );
+          const others = occurrences
+            .filter((anchor) => !anchorsOverlap(anchor, request.anchor))
+            .slice(0, MAX_AUTO_GLOSS_OCCURRENCES);
+
+          const stillPresent = annotationsRef.current
+            .get(activeDocument.id)
+            ?.some((item) => item.id === annotationId);
+
+          if (others.length && stillPresent) {
+            updateActiveDocumentAnnotations((currentAnnotations) => {
+              // Drop any prior annotation sitting on a spot we're about to fill
+              // (e.g. a stale group from re-glossing the same word); the seed
+              // annotation is always kept.
+              const deduped = currentAnnotations.filter(
+                (item) =>
+                  item.id === annotationId ||
+                  !others.some((anchor) => anchorsOverlap(item.anchor, anchor)),
+              );
+              const additions: GlossAnnotation[] = others.map((anchor) => ({
+                id: createGlossAnnotationId(),
+                groupId,
+                sourceText: selectedText,
+                definition: result.definition,
+                anchor,
+                scale: getAnchorCurrentScale(registryRef.current, anchor),
+              }));
+              return [...deduped, ...additions];
+            });
+            scheduleRenderActiveAnnotations();
+          }
+        }
       } catch {
         const annotations = annotationsRef.current.get(activeDocument.id);
         const annotation = annotations?.find((item) => item.id === annotationId);
@@ -3139,6 +3368,26 @@ function App() {
       opacity:
         translation?.style?.opacity ?? settings.display.translationOpacity,
     };
+  })();
+
+  // True when the right-clicked gloss belongs to a multi-occurrence group, so we
+  // can offer "取消整篇标注（仅留此处）".
+  const canCollapseGlossGroup = (() => {
+    if (
+      contextMenu?.type !== "annotation" ||
+      contextMenu.target.kind !== "gloss" ||
+      !activeDocument
+    ) {
+      return false;
+    }
+
+    const annotations = annotationsRef.current.get(activeDocument.id) ?? [];
+    const groupId = annotations.find(
+      (item) => item.id === contextMenu.target.id,
+    )?.groupId;
+    if (!groupId) return false;
+
+    return annotations.filter((item) => item.groupId === groupId).length > 1;
   })();
 
   return (
@@ -3478,6 +3727,17 @@ function App() {
               ))}
             </select>
           </div>
+
+          {canCollapseGlossGroup && (
+            <button
+              className="app-context-menu-item"
+              onClick={handleCollapseGlossGroup}
+              role="menuitem"
+              type="button"
+            >
+              取消整篇标注（仅留此处）
+            </button>
+          )}
 
           <button
             className="app-context-menu-item is-destructive"

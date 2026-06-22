@@ -35,6 +35,8 @@ export interface Settings {
   glossing: {
     defaultDomain: string;
     language: string;
+    /** When on, glossing a single word marks every occurrence in the document. */
+    autoGlossAllOccurrences: boolean;
   };
   display: {
     annotationFontSize: string;
@@ -282,6 +284,7 @@ export function createDefaultSettings(): Settings {
     glossing: {
       defaultDomain: 'auto',
       language: 'zh',
+      autoGlossAllOccurrences: true,
     },
     display: {
       annotationFontSize: '18px',
@@ -327,6 +330,9 @@ export function loadSettings(): Settings {
           defaultDomain:
             parsed.glossing?.defaultDomain ?? defaults.glossing.defaultDomain,
           language: parsed.glossing?.language ?? defaults.glossing.language,
+          autoGlossAllOccurrences:
+            parsed.glossing?.autoGlossAllOccurrences ??
+            defaults.glossing.autoGlossAllOccurrences,
         },
         display: { ...defaults.display, ...parsed.display },
         reader: { ...defaults.reader, ...parsed.reader },

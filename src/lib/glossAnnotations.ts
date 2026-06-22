@@ -49,6 +49,11 @@ export interface GlossAnnotation {
   id: string;
   sourceText: string;
   definition: string;
+  /**
+   * Links every occurrence of the same word that was glossed together via
+   * "gloss all occurrences". Standalone/legacy glosses leave this undefined.
+   */
+  groupId?: string;
   anchor: GlossAnnotationAnchor;
   scale?: number;
   offset?: {

@@ -418,6 +418,27 @@ export default function Settings({ settings, onSettingsChange, onClose, onCheckF
               <h2 className="settings-section-title">释义设置</h2>
 
               <div className="settings-row">
+                <div>
+                  <div className="settings-label">整篇标注相同单词</div>
+                  <div className="settings-desc">
+                    释义一个单词后，自动在全文标注所有相同单词（按整词匹配，忽略大小写）
+                  </div>
+                </div>
+                <div className="settings-control">
+                  <label className="settings-switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.glossing.autoGlossAllOccurrences}
+                      onChange={(e) =>
+                        update('glossing', 'autoGlossAllOccurrences', e.target.checked)
+                      }
+                    />
+                    <span className="settings-switch-track" aria-hidden="true" />
+                  </label>
+                </div>
+              </div>
+
+              <div className="settings-row">
                 <div><div className="settings-label">默认论文领域</div></div>
                 <div className="settings-control">
                   <select

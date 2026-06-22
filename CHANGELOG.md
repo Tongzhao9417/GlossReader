@@ -5,6 +5,14 @@ All notable changes to GlossReader are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-22
+
+### Added
+
+- **Gloss every occurrence of a word.** After you define a word, GlossReader marks and glosses every other occurrence of it across the whole document, so you only have to look a term up once. Matching is whole-word and case-insensitive (glossing "power" leaves "powerful" untouched, but covers a sentence-initial "Power"). This is on by default and can be turned off with the new "整篇标注相同单词" toggle in Settings → 释义设置.
+- **Singular and plural are matched together.** Glossing a noun also covers its other number form — define "model" and "models" is glossed too, "analysis" also catches "analyses", "stimulus" also catches "stimuli". Only noun singular/plural pairs are linked; verb and adjective inflections (-ing, -ed, -er) are deliberately left out.
+- **Per-word control from the right-click menu.** Right-clicking a word that is glossed throughout the document adds "取消整篇标注（仅留此处）", which removes the other occurrences and keeps just the one you clicked. Editing or re-fetching a definition updates every occurrence of that word at once.
+
 ## [1.1.0] - 2026-06-22
 
 ### Added
@@ -63,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Configurable keyboard shortcuts.** A new "快捷键" tab in Settings lets you
   rebind the gloss and find shortcuts, with a warning when the two collide.
 
+[1.1.1]: https://github.com/Tongzhao9417/GlossReader/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Tongzhao9417/GlossReader/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Tongzhao9417/GlossReader/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Tongzhao9417/GlossReader/releases/tag/v1.0.0
