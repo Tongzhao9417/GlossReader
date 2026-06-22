@@ -1,35 +1,44 @@
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   Settings as SettingsType,
+  PROVIDERS,
   MODEL_OPTIONS,
   DEFAULT_MODELS,
   BASE_URL_PLACEHOLDERS,
   DEFAULT_GLOSS_PROMPT_TEMPLATE,
   DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
+  getProvider,
 } from '../lib/settings';
 import {
   DEFAULT_FIND_SHORTCUT,
   DEFAULT_GLOSS_SHORTCUT,
+  DEFAULT_HIGHLIGHT_SHORTCUT,
+  DEFAULT_ROTATE_CCW_SHORTCUT,
+  DEFAULT_ROTATE_CW_SHORTCUT,
+  DEFAULT_SQUIGGLY_SHORTCUT,
+  DEFAULT_STRIKEOUT_SHORTCUT,
+  DEFAULT_UNDERLINE_SHORTCUT,
+  DEFAULT_ZOOM_IN_SHORTCUT,
+  DEFAULT_ZOOM_OUT_SHORTCUT,
   formatKeyboardShortcutLabel,
   keyboardEventToShortcut,
   normalizeKeyboardShortcut,
 } from '../lib/keyboardShortcuts';
 import {
-  checkAndInstallUpdate,
   GITHUB_REPOSITORY_URL,
   loadAppInfo,
   openGitHubRepository,
   type AppInfo,
-  type UpdateState,
 } from '../lib/updater';
 import './Settings.css';
 
-type SettingsTab = 'ai' | 'display' | 'shortcuts' | 'vocabulary' | 'about';
+type SettingsTab = 'ai' | 'display' | 'reader' | 'shortcuts' | 'vocabulary' | 'about';
 
 interface SettingsProps {
   settings: SettingsType;
   onSettingsChange: (settings: SettingsType) => void;
   onClose: () => void;
+  onCheckForUpdate: () => void;
 }
 
 const DOMAIN_OPTIONS = [
@@ -75,6 +84,42 @@ const COLOR_OPTIONS = [
   { label: '黑色', value: 'black', color: '#1f2328' },
 ];
 
+const ZOOM_OPTIONS = [
+  { label: '适合宽度', value: 'fit-width' },
+  { label: '适合页面', value: 'fit-page' },
+  { label: '自动', value: 'automatic' },
+  { label: '50%', value: '0.5' },
+  { label: '75%', value: '0.75' },
+  { label: '100%', value: '1' },
+  { label: '125%', value: '1.25' },
+  { label: '150%', value: '1.5' },
+  { label: '200%', value: '2' },
+];
+
+const SCROLL_DIRECTION_OPTIONS = [
+  { label: '垂直', value: 'vertical' },
+  { label: '水平', value: 'horizontal' },
+];
+
+const SPREAD_OPTIONS = [
+  { label: '单页', value: 'none' },
+  { label: '双页（奇数起）', value: 'odd' },
+  { label: '双页（偶数起）', value: 'even' },
+];
+
+const PAGE_GAP_OPTIONS = [
+  { label: '紧凑（8px）', value: '8' },
+  { label: '标准（12px）', value: '12' },
+  { label: '宽松（16px）', value: '16' },
+  { label: '超宽（24px）', value: '24' },
+];
+
+const READER_THEME_OPTIONS = [
+  { label: '浅色', value: 'light' },
+  { label: '深色', value: 'dark' },
+  { label: '跟随系统', value: 'system' },
+];
+
 interface ShortcutInputProps {
   value: string;
   onChange: (shortcut: string) => void;
@@ -110,22 +155,13 @@ function ShortcutInput({ value, onChange }: ShortcutInputProps) {
   );
 }
 
-export default function Settings({ settings, onSettingsChange, onClose }: SettingsProps) {
+export default function Settings({ settings, onSettingsChange, onClose, onCheckForUpdate }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('ai');
   const [showApiKey, setShowApiKey] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo>({
     name: 'GlossReader',
-    version: '1.0.1',
+    version: '1.1.0',
   });
-  const [updateState, setUpdateState] = useState<UpdateState>({
-    status: 'idle',
-    message: '',
-  });
-  const isCheckingUpdate =
-    updateState.status === 'checking' ||
-    updateState.status === 'downloading' ||
-    updateState.status === 'installing' ||
-    updateState.status === 'restarting';
   const shortcutConflict =
     normalizeKeyboardShortcut(settings.shortcuts.gloss) ===
     normalizeKeyboardShortcut(settings.shortcuts.find);
@@ -165,9 +201,7 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
     });
   }
 
-  async function handleCheckForUpdate() {
-    await checkAndInstallUpdate(setUpdateState, { confirmBeforeInstall: true });
-  }
+  const providerConfig = getProvider(settings.ai.provider);
 
   return (
     <div className="settings-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -199,6 +233,13 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
               <path d="M17 14l3 3-3 3" />
             </svg>
             显示
+          </button>
+          <button className={`settings-nav-item ${activeTab === 'reader' ? 'active' : ''}`} onClick={() => setActiveTab('reader')}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" />
+              <path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
+            </svg>
+            阅读器
           </button>
           <button className={`settings-nav-item ${activeTab === 'shortcuts' ? 'active' : ''}`} onClick={() => setActiveTab('shortcuts')}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -240,15 +281,14 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
                     value={settings.ai.provider}
                     onChange={(e) => handleProviderChange(e.target.value as SettingsType['ai']['provider'])}
                   >
-                    <option value="anthropic">Anthropic (Claude)</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="ollama">Ollama (本地)</option>
+                    {PROVIDERS.map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
                   </select>
                 </div>
               </div>
 
-              {settings.ai.provider !== 'ollama' && (
+              {providerConfig?.requiresKey !== false && (
                 <div className="settings-row">
                   <div>
                     <div className="settings-label">API Key</div>
@@ -261,7 +301,7 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
                         type={showApiKey ? 'text' : 'password'}
                         value={settings.ai.apiKey}
                         onChange={(e) => update('ai', 'apiKey', e.target.value)}
-                        placeholder={settings.ai.provider === 'anthropic' ? 'sk-ant-...' : 'sk-...'}
+                        placeholder={providerConfig?.apiKeyPlaceholder ?? ''}
                       />
                       <button className="settings-password-toggle" onClick={() => setShowApiKey(!showApiKey)}>
                         {showApiKey ? (
@@ -283,27 +323,25 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
               )}
 
               <div className="settings-row">
-                <div><div className="settings-label">模型</div></div>
+                <div>
+                  <div className="settings-label">模型</div>
+                  <div className="settings-desc">可从建议中选择，或直接输入模型名称</div>
+                </div>
                 <div className="settings-control">
-                  {settings.ai.provider === 'ollama' ? (
-                    <input
-                      className="settings-input"
-                      type="text"
-                      value={settings.ai.model}
-                      onChange={(e) => update('ai', 'model', e.target.value)}
-                      placeholder="llama3"
-                    />
-                  ) : (
-                    <select
-                      className="settings-select"
-                      value={settings.ai.model}
-                      onChange={(e) => update('ai', 'model', e.target.value)}
-                    >
-                      {MODEL_OPTIONS[settings.ai.provider]?.map((m) => (
-                        <option key={m.value} value={m.value}>{m.label}</option>
-                      ))}
-                    </select>
-                  )}
+                  <input
+                    className="settings-input"
+                    type="text"
+                    list={`models-${settings.ai.provider}`}
+                    value={settings.ai.model}
+                    onChange={(e) => update('ai', 'model', e.target.value)}
+                    placeholder={providerConfig?.defaultModel ?? ''}
+                    spellCheck={false}
+                  />
+                  <datalist id={`models-${settings.ai.provider}`}>
+                    {MODEL_OPTIONS[settings.ai.provider]?.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </datalist>
                 </div>
               </div>
 
@@ -569,6 +607,102 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
             </>
           )}
 
+          {activeTab === 'reader' && (
+            <>
+              <h2 className="settings-section-title">阅读器</h2>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">默认缩放</div>
+                  <div className="settings-desc">打开文档时的初始缩放</div>
+                </div>
+                <div className="settings-control">
+                  <select
+                    className="settings-select"
+                    value={settings.reader.defaultZoom}
+                    onChange={(e) => update('reader', 'defaultZoom', e.target.value)}
+                  >
+                    {ZOOM_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">滚动方向</div>
+                  <div className="settings-desc">垂直或水平滚动翻页</div>
+                </div>
+                <div className="settings-control">
+                  <select
+                    className="settings-select"
+                    value={settings.reader.scrollDirection}
+                    onChange={(e) => update('reader', 'scrollDirection', e.target.value)}
+                  >
+                    {SCROLL_DIRECTION_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">页面布局</div>
+                  <div className="settings-desc">单页或双页并排显示</div>
+                </div>
+                <div className="settings-control">
+                  <select
+                    className="settings-select"
+                    value={settings.reader.spreadMode}
+                    onChange={(e) => update('reader', 'spreadMode', e.target.value)}
+                  >
+                    {SPREAD_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">页面间距</div>
+                  <div className="settings-desc">相邻页面之间的间隙</div>
+                </div>
+                <div className="settings-control">
+                  <select
+                    className="settings-select"
+                    value={String(settings.reader.pageGap)}
+                    onChange={(e) => update('reader', 'pageGap', Number(e.target.value))}
+                  >
+                    {PAGE_GAP_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">阅读器主题</div>
+                  <div className="settings-desc">PDF 阅读区域的明暗主题</div>
+                </div>
+                <div className="settings-control">
+                  <select
+                    className="settings-select"
+                    value={settings.reader.theme}
+                    onChange={(e) => update('reader', 'theme', e.target.value)}
+                  >
+                    {READER_THEME_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+
           {activeTab === 'shortcuts' && (
             <>
               <h2 className="settings-section-title">快捷键</h2>
@@ -611,6 +745,165 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
                 </div>
               </div>
 
+              <h2 className="settings-section-title">阅读器</h2>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">放大</div>
+                  <div className="settings-desc">放大 PDF 视图</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.zoomIn}
+                    onChange={(shortcut) => update('shortcuts', 'zoomIn', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'zoomIn', DEFAULT_ZOOM_IN_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">缩小</div>
+                  <div className="settings-desc">缩小 PDF 视图</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.zoomOut}
+                    onChange={(shortcut) => update('shortcuts', 'zoomOut', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'zoomOut', DEFAULT_ZOOM_OUT_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">顺时针旋转</div>
+                  <div className="settings-desc">将页面顺时针旋转 90°</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.rotateClockwise}
+                    onChange={(shortcut) => update('shortcuts', 'rotateClockwise', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'rotateClockwise', DEFAULT_ROTATE_CW_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">逆时针旋转</div>
+                  <div className="settings-desc">将页面逆时针旋转 90°</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.rotateCounterclockwise}
+                    onChange={(shortcut) => update('shortcuts', 'rotateCounterclockwise', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'rotateCounterclockwise', DEFAULT_ROTATE_CCW_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <h2 className="settings-section-title">批注</h2>
+              <div className="settings-desc settings-section-hint">
+                先选中文本，再按下快捷键即可对所选内容添加标注。
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">高亮</div>
+                  <div className="settings-desc">为选中文本添加高亮</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.highlight}
+                    onChange={(shortcut) => update('shortcuts', 'highlight', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'highlight', DEFAULT_HIGHLIGHT_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">下划线</div>
+                  <div className="settings-desc">为选中文本添加下划线</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.underline}
+                    onChange={(shortcut) => update('shortcuts', 'underline', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'underline', DEFAULT_UNDERLINE_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">删除线</div>
+                  <div className="settings-desc">为选中文本添加删除线</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.strikeout}
+                    onChange={(shortcut) => update('shortcuts', 'strikeout', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'strikeout', DEFAULT_STRIKEOUT_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div>
+                  <div className="settings-label">波浪线</div>
+                  <div className="settings-desc">为选中文本添加波浪下划线</div>
+                </div>
+                <div className="settings-shortcut-control">
+                  <ShortcutInput
+                    value={settings.shortcuts.squiggly}
+                    onChange={(shortcut) => update('shortcuts', 'squiggly', shortcut)}
+                  />
+                  <button
+                    className="settings-action-btn secondary compact"
+                    onClick={() => update('shortcuts', 'squiggly', DEFAULT_SQUIGGLY_SHORTCUT)}
+                  >
+                    默认
+                  </button>
+                </div>
+              </div>
+
               {shortcutConflict && (
                 <div className="settings-shortcut-warning">
                   释义和查找正在使用同一个快捷键。选中文本时释义会优先触发。
@@ -643,23 +936,11 @@ export default function Settings({ settings, onSettingsChange, onClose }: Settin
                   <div className="settings-desc">从 GitHub Release 检测并安装新版本</div>
                 </div>
                 <div className="settings-control">
-                  <button
-                    className="settings-action-btn"
-                    disabled={isCheckingUpdate}
-                    onClick={handleCheckForUpdate}
-                  >
-                    {isCheckingUpdate ? '正在更新...' : '检测更新'}
+                  <button className="settings-action-btn" onClick={onCheckForUpdate}>
+                    检测更新
                   </button>
                 </div>
               </div>
-
-              {updateState.message && (
-                <div
-                  className={`settings-update-status status-${updateState.status}`}
-                >
-                  {updateState.message}
-                </div>
-              )}
 
               <div className="settings-row">
                 <div>

@@ -1,5 +1,15 @@
 export const DEFAULT_GLOSS_SHORTCUT = "Meta+D";
 export const DEFAULT_FIND_SHORTCUT = "Meta+F";
+export const DEFAULT_ZOOM_IN_SHORTCUT = "Meta+=";
+export const DEFAULT_ZOOM_OUT_SHORTCUT = "Meta+-";
+export const DEFAULT_ROTATE_CW_SHORTCUT = "Meta+]";
+export const DEFAULT_ROTATE_CCW_SHORTCUT = "Meta+[";
+// Annotation markup tools. EmbedPDF ships no built-in shortcuts for these, so
+// these defaults are GlossReader's own choices (all unused by EmbedPDF/the app).
+export const DEFAULT_HIGHLIGHT_SHORTCUT = "Meta+Shift+H";
+export const DEFAULT_UNDERLINE_SHORTCUT = "Meta+Shift+U";
+export const DEFAULT_STRIKEOUT_SHORTCUT = "Meta+Shift+X";
+export const DEFAULT_SQUIGGLY_SHORTCUT = "Meta+Shift+W";
 
 const MODIFIER_ORDER = ["Meta", "Ctrl", "Alt", "Shift"] as const;
 const MODIFIER_LABELS: Record<string, string> = {

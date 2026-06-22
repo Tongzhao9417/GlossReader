@@ -51,6 +51,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Use the latest CHANGELOG.md section (everything between the first two
+      # "## [x.y.z]" headers) as the release body.
+      - name: Prepare release notes
+        id: release_notes
+        shell: bash
+        run: |
+          {
+            echo "notes<<__NOTES_EOF__"
+            awk '/^## \[/{n++} n==1{print} n>=2{exit}' CHANGELOG.md
+            echo "__NOTES_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -60,7 +72,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "GlossReader v__VERSION__"
-          releaseBody: "GlossReader release."
+          releaseBody: ${{ steps.release_notes.outputs.notes }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

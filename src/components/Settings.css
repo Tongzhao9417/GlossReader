@@ -192,6 +192,12 @@
   margin-top: 2px;
 }
 
+/* Hint line shown directly under a section title (e.g. annotation shortcuts). */
+.settings-section-hint {
+  margin-top: -12px;
+  margin-bottom: 12px;
+}
+
 .settings-control {
   flex-shrink: 0;
   display: flex;

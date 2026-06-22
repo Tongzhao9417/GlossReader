@@ -1,9 +1,11 @@
 import { isTauri } from "@tauri-apps/api/core";
 import {
   type Settings,
+  API_PATHS,
   BASE_URL_PLACEHOLDERS,
   DEFAULT_GLOSS_PROMPT_TEMPLATE,
   DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
+  getProvider,
 } from "./settings";
 
 export interface GlossResult {
@@ -85,12 +87,10 @@ function getBaseUrl(settings: Settings): string {
 }
 
 function getProxyPrefix(provider: string): string {
-  const map: Record<string, string> = {
-    deepseek: "/api/deepseek",
-    openai: "/api/openai",
-    anthropic: "/api/anthropic",
-  };
-  return map[provider] ?? "";
+  // Dev-only: mirrors the proxy entries in vite.config.ts. Ollama talks to
+  // localhost directly, so it has no proxy prefix.
+  if (provider === "ollama") return "";
+  return `/api/${provider}`;
 }
 
 async function requestCompletion(
@@ -99,20 +99,21 @@ async function requestCompletion(
 ): Promise<string> {
   const { provider, apiKey, model } = settings.ai;
 
-  if (provider !== "ollama" && !apiKey) {
+  if (getProvider(provider)?.requiresKey !== false && !apiKey) {
     throw new Error("请先在设置中填写 API Key");
   }
 
   const baseUrl = getBaseUrl(settings);
+  const apiPath = API_PATHS[provider] ?? "/v1";
   const inTauri = isTauri();
 
   let url: string;
   if (provider === "ollama") {
-    url = `${baseUrl || "http://localhost:11434"}/v1/chat/completions`;
+    url = `${baseUrl || "http://localhost:11434"}${apiPath}/chat/completions`;
   } else if (inTauri) {
-    url = `${baseUrl}/v1/chat/completions`;
+    url = `${baseUrl}${apiPath}/chat/completions`;
   } else {
-    url = `${getProxyPrefix(provider)}/v1/chat/completions`;
+    url = `${getProxyPrefix(provider)}${apiPath}/chat/completions`;
   }
 
   const headers: Record<string, string> = {
@@ -120,6 +121,11 @@ async function requestCompletion(
   };
   if (apiKey) {
     headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+  if (provider === "openrouter") {
+    // Optional attribution headers for OpenRouter's dashboard/leaderboard.
+    headers["HTTP-Referer"] = "https://github.com/Tongzhao9417/GlossReader";
+    headers["X-Title"] = "GlossReader";
   }
 
   const body = {

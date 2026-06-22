@@ -11,22 +11,40 @@ import {
   type EmbedPdfContainer,
   PDFViewer,
   type PluginRegistry,
+  ScrollStrategy,
+  SpreadMode,
   ZoomMode,
+  type ZoomLevel,
   type PDFViewerConfig,
 } from "@embedpdf/react-pdf-viewer";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen } from "@tauri-apps/api/event";
 import { openPdfFiles, readPdfFile, type OpenPdfResult } from "./lib/tauriCommands";
 import { type Settings as SettingsType, loadSettings, saveSettings } from "./lib/settings";
 import {
   DEFAULT_FIND_SHORTCUT,
   DEFAULT_GLOSS_SHORTCUT,
+  DEFAULT_HIGHLIGHT_SHORTCUT,
+  DEFAULT_ROTATE_CCW_SHORTCUT,
+  DEFAULT_ROTATE_CW_SHORTCUT,
+  DEFAULT_SQUIGGLY_SHORTCUT,
+  DEFAULT_STRIKEOUT_SHORTCUT,
+  DEFAULT_UNDERLINE_SHORTCUT,
+  DEFAULT_ZOOM_IN_SHORTCUT,
+  DEFAULT_ZOOM_OUT_SHORTCUT,
   formatKeyboardShortcutLabel,
   isKeyboardShortcut,
   normalizeKeyboardShortcut,
 } from "./lib/keyboardShortcuts";
 import { fetchGloss, fetchTranslation } from "./lib/aiService";
-import { checkAndInstallUpdate } from "./lib/updater";
+import {
+  checkForUpdate,
+  downloadAndInstallUpdate,
+  isUpdaterEndpointMissing,
+  restartApp,
+  type Update,
+} from "./lib/updater";
 import {
   type AnnotationStyle,
   type AnnotationLayoutProvider,
@@ -41,6 +59,7 @@ import {
   renderAnnotations,
 } from "./lib/glossAnnotations";
 import Settings from "./components/Settings";
+import UpdateDialog, { type UpdateDialogState } from "./components/UpdateDialog";
 import "./App.css";
 
 const SELECTION_COLOR = "#CCDEF7";
@@ -53,6 +72,107 @@ const SELECTION_CONTEXT_SNAPSHOT_MAX_DISTANCE = 12;
 const DEFAULT_PDF_INTERACTION_MODE = "pointerMode";
 const PDF_FIND_COMMAND_ID = "panel:toggle-search";
 const KNOWN_PDF_FIND_SHORTCUTS = ["Ctrl+F", "Meta+F", "Ctrl+D", "Meta+D"];
+
+// EmbedPDF reader commands exposed as remappable shortcuts, with their built-in
+// default bindings (used to locate the command and clear the originals).
+const READER_SHORTCUT_COMMANDS = [
+  {
+    settingKey: "zoomIn",
+    commandId: "zoom:in",
+    fallback: DEFAULT_ZOOM_IN_SHORTCUT,
+    knownDefaults: ["Ctrl+=", "Meta+=", "Ctrl+NumpadAdd", "Meta+NumpadAdd"],
+  },
+  {
+    settingKey: "zoomOut",
+    commandId: "zoom:out",
+    fallback: DEFAULT_ZOOM_OUT_SHORTCUT,
+    knownDefaults: ["Ctrl+-", "Meta+-", "Ctrl+NumpadSubtract", "Meta+NumpadSubtract"],
+  },
+  {
+    settingKey: "rotateClockwise",
+    commandId: "rotate:clockwise",
+    fallback: DEFAULT_ROTATE_CW_SHORTCUT,
+    knownDefaults: ["Ctrl+]", "Meta+]"],
+  },
+  {
+    settingKey: "rotateCounterclockwise",
+    commandId: "rotate:counter-clockwise",
+    fallback: DEFAULT_ROTATE_CCW_SHORTCUT,
+    knownDefaults: ["Ctrl+[", "Meta+["],
+  },
+] as const satisfies ReadonlyArray<{
+  settingKey: keyof SettingsType["shortcuts"];
+  commandId: string;
+  fallback: string;
+  knownDefaults: string[];
+}>;
+
+// EmbedPDF text-markup annotation commands. These have NO built-in shortcuts
+// (toolbar-only), so knownDefaults is empty — patching just adds a fresh
+// binding. Each command annotates the current text selection (no-op if none).
+const ANNOTATION_SHORTCUT_COMMANDS = [
+  {
+    settingKey: "highlight",
+    commandId: "annotation:add-highlight",
+    fallback: DEFAULT_HIGHLIGHT_SHORTCUT,
+    knownDefaults: [],
+  },
+  {
+    settingKey: "underline",
+    commandId: "annotation:add-underline",
+    fallback: DEFAULT_UNDERLINE_SHORTCUT,
+    knownDefaults: [],
+  },
+  {
+    settingKey: "strikeout",
+    commandId: "annotation:add-strikeout",
+    fallback: DEFAULT_STRIKEOUT_SHORTCUT,
+    knownDefaults: [],
+  },
+  {
+    settingKey: "squiggly",
+    commandId: "annotation:add-squiggly",
+    fallback: DEFAULT_SQUIGGLY_SHORTCUT,
+    knownDefaults: [],
+  },
+] as const satisfies ReadonlyArray<{
+  settingKey: keyof SettingsType["shortcuts"];
+  commandId: string;
+  fallback: string;
+  knownDefaults: string[];
+}>;
+
+function toZoomLevel(value: string): ZoomLevel {
+  switch (value) {
+    case "fit-width":
+      return ZoomMode.FitWidth;
+    case "fit-page":
+      return ZoomMode.FitPage;
+    case "automatic":
+      return ZoomMode.Automatic;
+    default: {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : ZoomMode.FitWidth;
+    }
+  }
+}
+
+function toScrollStrategy(value: string): ScrollStrategy {
+  return value === "horizontal"
+    ? ScrollStrategy.Horizontal
+    : ScrollStrategy.Vertical;
+}
+
+function toSpreadMode(value: string): SpreadMode {
+  switch (value) {
+    case "odd":
+      return SpreadMode.Odd;
+    case "even":
+      return SpreadMode.Even;
+    default:
+      return SpreadMode.None;
+  }
+}
 const GLOSS_ANNOTATIONS_STORAGE_KEY = "glossreader-gloss-annotations";
 const TRANSLATIONS_STORAGE_KEY = "glossreader-side-translations";
 const INLINE_GLOSS_MAX_WORDS = 5;
@@ -648,9 +768,101 @@ function getPdfFindShortcuts(findShortcut: string) {
   return [getConfiguredShortcut(findShortcut, DEFAULT_FIND_SHORTCUT)];
 }
 
-function patchPdfFindShortcut(
+const ANNOTATION_PLUGIN_ID = "annotation";
+const SELECTION_PLUGIN_ID = "selection";
+const MARKUP_TOOL_REVERT_FLAG = "__glossReaderMarkupRevert";
+
+interface AnnotationToolLike {
+  id?: string;
+}
+
+interface AnnotationDocumentScopeLike {
+  getActiveTool?: () => AnnotationToolLike | null;
+  setActiveTool?: (toolId: string | null) => void;
+}
+
+interface AnnotationCapabilityLike {
+  forDocument?: (documentId: string) => AnnotationDocumentScopeLike | undefined;
+}
+
+interface SelectionDocumentScopeLike {
+  getFormattedSelection?: () => unknown[];
+}
+
+interface SelectionScopedCapabilityLike {
+  forDocument?: (documentId: string) => SelectionDocumentScopeLike | undefined;
+}
+
+interface PdfCommandContextLike {
+  registry: PluginRegistry;
+  documentId: string;
+}
+
+type PdfCommandActionLike = (context: PdfCommandContextLike) => void;
+
+// EmbedPDF's markup commands (highlight/underline/strikeout/squiggly) leave the
+// tool ACTIVE after annotating a pre-existing selection, trapping the cursor in
+// tool mode. Wrap the action so that when it runs WITH a live text selection (a
+// one-shot markup of the selected text), the tool reverts to selection mode
+// afterward. When triggered WITHOUT a selection, EmbedPDF's default toggle
+// (enter/exit a sticky tool mode) is preserved untouched.
+function wrapMarkupCommandAction(
+  action: PdfCommandActionLike,
+  registry: PluginRegistry,
+): PdfCommandActionLike {
+  const tagged = action as PdfCommandActionLike & {
+    [MARKUP_TOOL_REVERT_FLAG]?: boolean;
+  };
+  if (tagged[MARKUP_TOOL_REVERT_FLAG]) return tagged;
+
+  const wrapped = ((context: PdfCommandContextLike) => {
+    const documentId = context?.documentId;
+    const annotation = (
+      registry.getPlugin(ANNOTATION_PLUGIN_ID) as
+        | PluginWithCapability<AnnotationCapabilityLike>
+        | null
+        | undefined
+    )?.provides?.();
+    const selection = (
+      registry.getPlugin(SELECTION_PLUGIN_ID) as
+        | PluginWithCapability<SelectionScopedCapabilityLike>
+        | null
+        | undefined
+    )?.provides?.();
+
+    const selectionScope = documentId
+      ? selection?.forDocument?.(documentId)
+      : undefined;
+    const hadSelection =
+      (selectionScope?.getFormattedSelection?.()?.length ?? 0) > 0;
+
+    action(context);
+
+    // One-shot: marking up text that was already selected should hand control
+    // back to text selection, not strand the user in tool mode.
+    if (hadSelection && documentId) {
+      annotation?.forDocument?.(documentId)?.setActiveTool?.(null);
+    }
+  }) as PdfCommandActionLike & { [MARKUP_TOOL_REVERT_FLAG]?: boolean };
+
+  wrapped[MARKUP_TOOL_REVERT_FLAG] = true;
+  return wrapped;
+}
+
+// Remap an EmbedPDF command's keyboard shortcut: re-register the command with
+// the new bindings and rewrite the plugin's shortcutMap (clearing the built-in
+// defaults and any previously-applied custom binding for this command).
+// `wrapAction`, when given, transforms the command's action on re-registration
+// (used to adjust markup tool behavior); it must be idempotent.
+function patchPdfCommandShortcut(
   registry: PluginRegistry | null,
-  findShortcut: string,
+  commandId: string,
+  knownDefaults: readonly string[],
+  shortcuts: string[],
+  wrapAction?: (
+    action: PdfCommandActionLike,
+    registry: PluginRegistry,
+  ) => PdfCommandActionLike,
 ) {
   const commandsPlugin = registry?.getPlugin(
     "commands",
@@ -659,36 +871,72 @@ function patchPdfFindShortcut(
 
   if (!commandsPlugin || !commands) return;
 
-  const shortcuts = getPdfFindShortcuts(findShortcut);
-  const findCommand =
-    commandsPlugin.commands?.get(PDF_FIND_COMMAND_ID) ??
-    [...KNOWN_PDF_FIND_SHORTCUTS, ...shortcuts]
+  const command =
+    commandsPlugin.commands?.get(commandId) ??
+    [...knownDefaults, ...shortcuts]
       .map((shortcut) => commands.getCommandByShortcut(shortcut))
-      .find((command) => command?.id === PDF_FIND_COMMAND_ID);
+      .find((candidate) => candidate?.id === commandId);
 
-  if (findCommand) {
-    commands.unregisterCommand(PDF_FIND_COMMAND_ID);
-    commands.registerCommand({
-      ...findCommand,
-      shortcuts,
-    });
+  if (command) {
+    commands.unregisterCommand(commandId);
+    const nextCommand: PdfCommandLike = { ...command, shortcuts };
+    if (wrapAction && registry && typeof command.action === "function") {
+      nextCommand.action = wrapAction(
+        command.action as PdfCommandActionLike,
+        registry,
+      );
+    }
+    commands.registerCommand(nextCommand);
   }
 
   const shortcutMap = commandsPlugin.shortcutMap;
   if (!shortcutMap) return;
 
-  KNOWN_PDF_FIND_SHORTCUTS.forEach((shortcut) => {
-    const normalized = normalizePdfCommandShortcut(shortcut);
-    if (shortcutMap.get(normalized) === PDF_FIND_COMMAND_ID) {
-      shortcutMap.delete(normalized);
-    }
+  // Drop every existing binding pointing at this command so re-binding leaves
+  // no stragglers (covers both built-in defaults and prior custom bindings).
+  [...shortcutMap.keys()].forEach((key) => {
+    if (shortcutMap.get(key) === commandId) shortcutMap.delete(key);
   });
 
-  if (commandsPlugin.commands?.has(PDF_FIND_COMMAND_ID) || findCommand) {
+  if (commandsPlugin.commands?.has(commandId) || command) {
     shortcuts.forEach((shortcut) => {
-      shortcutMap.set(normalizePdfCommandShortcut(shortcut), PDF_FIND_COMMAND_ID);
+      shortcutMap.set(normalizePdfCommandShortcut(shortcut), commandId);
     });
   }
+}
+
+function patchPdfFindShortcut(
+  registry: PluginRegistry | null,
+  findShortcut: string,
+) {
+  patchPdfCommandShortcut(
+    registry,
+    PDF_FIND_COMMAND_ID,
+    KNOWN_PDF_FIND_SHORTCUTS,
+    getPdfFindShortcuts(findShortcut),
+  );
+}
+
+function patchPdfReaderShortcuts(
+  registry: PluginRegistry | null,
+  shortcuts: SettingsType["shortcuts"],
+) {
+  READER_SHORTCUT_COMMANDS.forEach((entry) => {
+    patchPdfCommandShortcut(registry, entry.commandId, entry.knownDefaults, [
+      getConfiguredShortcut(shortcuts[entry.settingKey], entry.fallback),
+    ]);
+  });
+  // Markup commands additionally get their action wrapped so a one-shot markup
+  // of a pre-existing selection reverts to selection mode (see wrapMarkupCommandAction).
+  ANNOTATION_SHORTCUT_COMMANDS.forEach((entry) => {
+    patchPdfCommandShortcut(
+      registry,
+      entry.commandId,
+      entry.knownDefaults,
+      [getConfiguredShortcut(shortcuts[entry.settingKey], entry.fallback)],
+      wrapMarkupCommandAction,
+    );
+  });
 }
 
 function getSelectionCapability(registry: PluginRegistry | null) {
@@ -1286,19 +1534,9 @@ function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [settings, setSettings] = useState<SettingsType>(loadSettings);
   const [showSettings, setShowSettings] = useState(false);
-
-  useEffect(() => {
-    if (!isTauri() || import.meta.env.DEV) return;
-
-    void checkAndInstallUpdate(
-      (state) => {
-        if (state.status === "error") {
-          console.warn(state.message);
-        }
-      },
-      { confirmBeforeInstall: true },
-    );
-  }, []);
+  const [updateDialog, setUpdateDialog] = useState<UpdateDialogState | null>(
+    null,
+  );
   const [viewerReadyRevision, setViewerReadyRevision] = useState(0);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [selectedTranslationId, setSelectedTranslationId] = useState<string | null>(null);
@@ -1318,6 +1556,7 @@ function App() {
   const lastSelectionRequestAtRef = useRef(0);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingUpdateRef = useRef<Update | null>(null);
 
   const activeDocument = useMemo(
     () =>
@@ -1325,6 +1564,8 @@ function App() {
       null,
     [activeDocumentId, documents],
   );
+
+  const reader = settings.reader;
 
   const viewerConfig = useMemo<PDFViewerConfig>(
     () => ({
@@ -1336,16 +1577,35 @@ function App() {
         ui: null,
         signature: null,
       },
-      theme: { preference: "light" },
+      theme: { preference: reader.theme as "light" | "dark" | "system" },
       tabBar: "never",
       zoom: {
-        defaultZoomLevel: ZoomMode.FitWidth,
+        defaultZoomLevel: toZoomLevel(reader.defaultZoom),
       },
       scroll: {
-        defaultPageGap: 12,
+        defaultStrategy: toScrollStrategy(reader.scrollDirection),
+        defaultPageGap: reader.pageGap,
+      },
+      spread: {
+        defaultSpreadMode: toSpreadMode(reader.spreadMode),
       },
     }),
-    [activeDocument],
+    [activeDocument, reader],
+  );
+
+  // Bumping the PDFViewer key on a reader-setting change remounts the viewer so
+  // the new defaults take effect on the current document. The Settings overlay
+  // covers the viewer while it reloads, so the remount is effectively invisible.
+  const readerConfigKey = useMemo(
+    () =>
+      [
+        reader.defaultZoom,
+        reader.scrollDirection,
+        reader.spreadMode,
+        reader.pageGap,
+        reader.theme,
+      ].join("|"),
+    [reader],
   );
 
   const updateActiveDocumentAnnotations = useCallback(
@@ -2174,6 +2434,137 @@ function App() {
     };
   }, [openPdfPaths]);
 
+  // Open PDFs handed to the app by the OS (Finder "Open With", Zotero, etc.).
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    // Warm opens (app already running) arrive as backend events.
+    listen<string[]>("open-files", (event) => {
+      void openPdfPaths(event.payload);
+    })
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch((err) => {
+        console.error("Failed to listen for open-file events:", err);
+      });
+
+    // Cold-start files (the app was launched to open them) were queued by the
+    // backend before the webview was ready; drain that queue now.
+    void invoke<string[]>("take_pending_files")
+      .then((paths) => {
+        if (!disposed && paths.length) void openPdfPaths(paths);
+      })
+      .catch((err) => {
+        console.error("Failed to read pending files:", err);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openPdfPaths]);
+
+  const runUpdateCheck = useCallback(async (options: { silent: boolean }) => {
+    if (!isTauri()) {
+      if (!options.silent) {
+        setUpdateDialog({ phase: "error", error: "请在应用中检测更新。" });
+      }
+      return;
+    }
+
+    if (!options.silent) setUpdateDialog({ phase: "checking" });
+
+    try {
+      const update = await checkForUpdate();
+      if (!update) {
+        pendingUpdateRef.current = null;
+        if (options.silent) setUpdateDialog(null);
+        else setUpdateDialog({ phase: "uptodate" });
+        return;
+      }
+
+      pendingUpdateRef.current = update;
+      setUpdateDialog({
+        phase: "available",
+        version: update.version,
+        currentVersion: update.currentVersion,
+        notes: update.body ?? "",
+      });
+    } catch (error) {
+      if (options.silent) {
+        console.warn(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      const message = isUpdaterEndpointMissing(error)
+        ? "暂时没有可用的更新。"
+        : `检测更新失败：${
+            error instanceof Error ? error.message : String(error)
+          }`;
+      setUpdateDialog({ phase: "error", error: message });
+    }
+  }, []);
+
+  const handleStartUpdateDownload = useCallback(async () => {
+    const update = pendingUpdateRef.current;
+    if (!update) return;
+
+    setUpdateDialog((current) => ({
+      phase: "downloading",
+      version: update.version,
+      currentVersion: update.currentVersion,
+      notes: current?.notes,
+      progress: undefined,
+    }));
+
+    try {
+      await downloadAndInstallUpdate(update, (progress) => {
+        setUpdateDialog((current) =>
+          current
+            ? { ...current, phase: "downloading", progress: progress.percent }
+            : current,
+        );
+      });
+      setUpdateDialog({
+        phase: "ready",
+        version: update.version,
+        currentVersion: update.currentVersion,
+      });
+    } catch (error) {
+      setUpdateDialog({
+        phase: "error",
+        error: `更新失败：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    }
+  }, []);
+
+  const handleRestartForUpdate = useCallback(async () => {
+    try {
+      await restartApp();
+    } catch (error) {
+      setUpdateDialog({
+        phase: "error",
+        error: `重启失败：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    }
+  }, []);
+
+  const dismissUpdateDialog = useCallback(() => setUpdateDialog(null), []);
+
+  // Silent check on launch: only surface a dialog when an update is available.
+  useEffect(() => {
+    if (!isTauri() || import.meta.env.DEV) return;
+    void runUpdateCheck({ silent: true });
+  }, [runUpdateCheck]);
+
   const handleViewerInit = useCallback((container: EmbedPdfContainer) => {
     embedPdfContainerRef.current = container;
     applySelectionColorOverride(container);
@@ -2185,14 +2576,16 @@ function App() {
     patchSelectionWordBoundary(registry);
     patchSelectionContextMenuClear(registry);
     patchPdfFindShortcut(registry, settings.shortcuts.find);
+    patchPdfReaderShortcuts(registry, settings.shortcuts);
     setViewerReadyRevision((revision) => revision + 1);
     scheduleRenderActiveAnnotations();
-  }, [scheduleRenderActiveAnnotations, settings.shortcuts.find]);
+  }, [scheduleRenderActiveAnnotations, settings.shortcuts]);
 
   useEffect(() => {
     if (viewerReadyRevision === 0) return;
     patchPdfFindShortcut(registryRef.current, settings.shortcuts.find);
-  }, [settings.shortcuts.find, viewerReadyRevision]);
+    patchPdfReaderShortcuts(registryRef.current, settings.shortcuts);
+  }, [settings.shortcuts, viewerReadyRevision]);
 
   const handleCopySelection = useCallback(() => {
     if (contextMenu?.type !== "selection" || !contextMenu.canCopy) return;
@@ -2852,7 +3245,7 @@ function App() {
       <div className="app-viewer">
         {activeDocument ? (
           <PDFViewer
-            key={activeDocument.id}
+            key={`${activeDocument.id}:${readerConfigKey}`}
             config={viewerConfig}
             style={{ width: "100%", height: "100%" }}
             onInit={handleViewerInit}
@@ -2954,6 +3347,16 @@ function App() {
           settings={settings}
           onSettingsChange={handleSettingsChange}
           onClose={() => setShowSettings(false)}
+          onCheckForUpdate={() => void runUpdateCheck({ silent: false })}
+        />
+      )}
+
+      {updateDialog && (
+        <UpdateDialog
+          {...updateDialog}
+          onStartDownload={() => void handleStartUpdateDownload()}
+          onRestart={() => void handleRestartForUpdate()}
+          onClose={dismissUpdateDialog}
         />
       )}
 

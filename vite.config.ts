@@ -44,6 +44,36 @@ export default defineConfig(async () => ({
         changeOrigin: true,
         rewrite: (path: string) => path.replace(/^\/api\/anthropic/, ""),
       },
+      "/api/gemini": {
+        target: "https://generativelanguage.googleapis.com",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api\/gemini/, ""),
+      },
+      "/api/minimax": {
+        target: "https://api.minimax.io",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api\/minimax/, ""),
+      },
+      "/api/kimi": {
+        target: "https://api.moonshot.cn",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api\/kimi/, ""),
+      },
+      "/api/mimo": {
+        target: "https://api.xiaomimimo.com",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api\/mimo/, ""),
+      },
+      "/api/openrouter": {
+        target: "https://openrouter.ai",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api\/openrouter/, ""),
+      },
+      "/api/volcengine": {
+        target: "https://ark.cn-beijing.volces.com",
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api\/volcengine/, ""),
+      },
     },
   },
 }));
