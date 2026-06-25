@@ -5,20 +5,17 @@ All notable changes to GlossReader are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-06-25
+
+### Changed
+
+- **Removed the floating toolbar on text selection.** Selecting text no longer pops up the small inline toolbar (copy / highlight / underline / strikeout / squiggly / link / redaction) over the selection — it got in the way while reading. Copying, annotating, and glossing are unchanged: use the right-click menu and your configured keyboard shortcuts.
+
 ## [1.1.2] - 2026-06-25
 
 ### Fixed
 
-- **Chinese text was missing from PDFs that don't embed their fonts.** Many
-  Chinese papers — CNKI (知网) exports in particular — reference system fonts
-  such as 宋体 (SimSun), 黑体 (SimHei), 仿宋 (FangSong), and 楷体 (KaiTi)
-  without embedding them in the file. GlossReader renders with PDFium compiled
-  to WebAssembly, which bundles no CJK fonts and cannot read the operating
-  system's fonts, so those characters showed up as blank space (English and
-  numbers were unaffected). GlossReader now ships Simplified Chinese fallback
-  fonts (Noto Sans Hans) and hands them to PDFium whenever a document's own
-  fonts are missing, so Chinese now displays correctly. The fonts are bundled
-  with the app, so this works completely offline.
+- **Chinese text was missing from PDFs that don't embed their fonts.** Many Chinese papers — CNKI (知网) exports in particular — reference system fonts such as 宋体 (SimSun), 黑体 (SimHei), 仿宋 (FangSong), and 楷体 (KaiTi) without embedding them in the file. GlossReader renders with PDFium compiled to WebAssembly, which bundles no CJK fonts and cannot read the operating system's fonts, so those characters showed up as blank space (English and numbers were unaffected). GlossReader now ships Simplified Chinese fallback fonts (Noto Sans Hans) and hands them to PDFium whenever a document's own fonts are missing, so Chinese now displays correctly. The fonts are bundled with the app, so this works completely offline.
 
 ## [1.1.1] - 2026-06-22
 
@@ -86,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Configurable keyboard shortcuts.** A new "快捷键" tab in Settings lets you
   rebind the gloss and find shortcuts, with a warning when the two collide.
 
+[1.1.3]: https://github.com/Tongzhao9417/GlossReader/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/Tongzhao9417/GlossReader/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Tongzhao9417/GlossReader/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Tongzhao9417/GlossReader/compare/v1.0.1...v1.1.0

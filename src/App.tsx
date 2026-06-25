@@ -842,6 +842,20 @@ function getPdfFindShortcuts(findShortcut: string) {
   return [getConfiguredShortcut(findShortcut, DEFAULT_FIND_SHORTCUT)];
 }
 
+interface UiSchemaCapabilityLike {
+  mergeSchema?: (partial: { selectionMenus?: Record<string, unknown> }) => void;
+}
+
+// EmbedPDF pops up a floating selection toolbar (copy / highlight / underline /
+// strikeout / squiggly / link / redaction) whenever text is selected. It gets in
+// the way of reading, so we clear the UI schema's selection menus once the viewer
+// is ready. This removes only that popover — the toolbar tabs, annotation
+// keyboard shortcuts, and the right-click gloss action are untouched.
+function removeSelectionMenus(registry: PluginRegistry) {
+  const ui = getPluginCapability<UiSchemaCapabilityLike>(registry, "ui");
+  ui?.mergeSchema?.({ selectionMenus: {} });
+}
+
 const ANNOTATION_PLUGIN_ID = "annotation";
 const SELECTION_PLUGIN_ID = "selection";
 const MARKUP_TOOL_REVERT_FLAG = "__glossReaderMarkupRevert";
@@ -2766,6 +2780,7 @@ function App() {
 
   const handleViewerReady = useCallback((registry: PluginRegistry) => {
     registryRef.current = registry;
+    removeSelectionMenus(registry);
     patchSelectionWordBoundary(registry);
     patchSelectionContextMenuClear(registry);
     patchPdfFindShortcut(registry, settings.shortcuts.find);
