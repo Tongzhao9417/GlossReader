@@ -1,7 +1,7 @@
 {
   "name": "gloss-reader",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.1.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,8 @@
     "postinstall": "node scripts/copy-pdfium.mjs"
   },
   "dependencies": {
+    "@embedpdf/fonts-sc": "^1.0.0",
+    "@embedpdf/models": "^2.14.4",
     "@embedpdf/react-pdf-viewer": "^2.14.4",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",

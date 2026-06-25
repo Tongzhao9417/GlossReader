@@ -17,6 +17,8 @@ import {
   type ZoomLevel,
   type PDFViewerConfig,
 } from "@embedpdf/react-pdf-viewer";
+import { FontCharset } from "@embedpdf/models";
+import { fonts as simplifiedChineseFonts } from "@embedpdf/fonts-sc";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
@@ -174,6 +176,50 @@ function toSpreadMode(value: string): SpreadMode {
       return SpreadMode.None;
   }
 }
+
+// PDFium requests fallback-font bytes synchronously while rendering. EmbedPDF's
+// built-in browser loader does not reliably return binary data in the WebKit
+// webview (it yields an empty/garbled buffer, so glyphs render blank), so we
+// load the font ourselves with a synchronous XHR using the "x-user-defined"
+// charset trick to read the response as raw bytes.
+function loadCjkFontSync(fontPath: string): Uint8Array | null {
+  const url =
+    fontPath.startsWith("http") || fontPath.startsWith("/")
+      ? fontPath
+      : `/embedpdf/fonts/sc/${fontPath}`;
+  try {
+    const request = new XMLHttpRequest();
+    request.open("GET", url, false);
+    request.overrideMimeType("text/plain; charset=x-user-defined");
+    request.send(null);
+    if (request.status !== 200) return null;
+    const binary = request.responseText;
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i) & 0xff;
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+// PDFium-WASM ships no CJK fonts and cannot read system fonts, so PDFs that do
+// not embed their Chinese fonts (e.g. CNKI exports) render blank without this
+// fallback. Simplified Chinese (GB2312) maps to self-hosted Noto Sans Hans
+// fonts under public/embedpdf/fonts/sc/ (copied by scripts/copy-pdfium.mjs) so
+// they load offline. The variant list is derived from the @embedpdf/fonts-sc
+// manifest to avoid drift.
+const CJK_FONT_FALLBACK = {
+  baseUrl: "/embedpdf/fonts/sc",
+  fonts: {
+    [FontCharset.GB2312]: simplifiedChineseFonts.map((font) => ({
+      url: font.file,
+      weight: font.weight,
+    })),
+  },
+  fontLoader: loadCjkFontSync,
+};
 const GLOSS_ANNOTATIONS_STORAGE_KEY = "glossreader-gloss-annotations";
 const TRANSLATIONS_STORAGE_KEY = "glossreader-side-translations";
 const INLINE_GLOSS_MAX_WORDS = 5;
@@ -1713,7 +1759,7 @@ function App() {
       src: activeDocument?.url,
       wasmUrl: "/embedpdf/pdfium.wasm",
       worker: false,
-      fontFallback: null,
+      fontFallback: CJK_FONT_FALLBACK,
       fonts: {
         ui: null,
         signature: null,
