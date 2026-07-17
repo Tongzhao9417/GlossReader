@@ -842,18 +842,43 @@ function getPdfFindShortcuts(findShortcut: string) {
   return [getConfiguredShortcut(findShortcut, DEFAULT_FIND_SHORTCUT)];
 }
 
+interface UiSchemaLike {
+  selectionMenus?: Record<string, unknown>;
+}
+
 interface UiSchemaCapabilityLike {
+  getSchema?: () => UiSchemaLike | undefined;
   mergeSchema?: (partial: { selectionMenus?: Record<string, unknown> }) => void;
 }
 
+// EmbedPDF keys its floating selection menus by what is selected. "selection" is
+// the text popover; "annotation" / "groupAnnotation" appear when an existing
+// annotation is selected and carry the ONLY delete (trash) button in the default
+// UI (annotation:delete-selected, which has no keyboard shortcut). Clearing all
+// of selectionMenus would therefore leave users unable to erase annotations.
+const TEXT_SELECTION_MENU_ID = "selection";
+
 // EmbedPDF pops up a floating selection toolbar (copy / highlight / underline /
 // strikeout / squiggly / link / redaction) whenever text is selected. It gets in
-// the way of reading, so we clear the UI schema's selection menus once the viewer
-// is ready. This removes only that popover — the toolbar tabs, annotation
-// keyboard shortcuts, and the right-click gloss action are untouched.
+// the way of reading, so we drop that one popover from the UI schema's selection
+// menus once the viewer is ready — while keeping the annotation selection menus
+// so their delete button (the only way to erase an annotation) stays available.
+// The toolbar tabs, annotation keyboard shortcuts, and the right-click gloss
+// action are untouched.
 function removeSelectionMenus(registry: PluginRegistry) {
   const ui = getPluginCapability<UiSchemaCapabilityLike>(registry, "ui");
-  ui?.mergeSchema?.({ selectionMenus: {} });
+  if (!ui?.mergeSchema) return;
+
+  // mergeSchema overwrites `selectionMenus` wholesale (no deep merge for that
+  // key), so rebuild the map without the text popover rather than clearing it.
+  // If the schema can't be read, no-op instead of wiping every selection menu —
+  // keeping the text popover is far better than losing annotation deletion.
+  const currentSelectionMenus = ui.getSchema?.()?.selectionMenus;
+  if (!currentSelectionMenus) return;
+
+  const nextSelectionMenus = { ...currentSelectionMenus };
+  delete nextSelectionMenus[TEXT_SELECTION_MENU_ID];
+  ui.mergeSchema({ selectionMenus: nextSelectionMenus });
 }
 
 const ANNOTATION_PLUGIN_ID = "annotation";

@@ -5,6 +5,12 @@ All notable changes to GlossReader are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-07-17
+
+### Fixed
+
+- **Deleting annotations works again.** Selecting an annotation you've drawn (ink, highlight, underline, strikethrough, squiggly, or a shape) once more brings up its toolbar with the delete button — the only way to erase an annotation in the default interface. When 1.1.3 hid the floating toolbar that appears on text selection, it inadvertently cleared *every* selection menu, including the one holding that delete button, so annotations could be added but never removed. Only the text-selection popup stays hidden now; the annotation menus and their delete button are back.
+
 ## [1.1.3] - 2026-06-25
 
 ### Changed
