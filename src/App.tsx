@@ -27,6 +27,10 @@ import {
   createAnnotationAutosave,
   type AnnotationAutosaveController,
 } from "./lib/annotationAutosave";
+import {
+  setupToolDefaultsPersistence,
+  type AnnotationToolLike as PersistedAnnotationToolLike,
+} from "./lib/annotationToolDefaults";
 import { type Settings as SettingsType, loadSettings, saveSettings } from "./lib/settings";
 import {
   DEFAULT_FIND_SHORTCUT,
@@ -369,6 +373,11 @@ interface AnnotationCapabilityLike {
   commit: () => PdfTask<unknown>;
   onAnnotationEvent?: (
     listener: (event: { type: string }) => void,
+  ) => () => void;
+  getTools?: () => PersistedAnnotationToolLike[];
+  setToolDefaults?: (toolId: string, patch: Record<string, unknown>) => void;
+  onToolsChange?: (
+    listener: (event: { tools?: PersistedAnnotationToolLike[] }) => void,
   ) => () => void;
 }
 
@@ -2358,6 +2367,18 @@ function App() {
       }
       controller.dispose();
     };
+  }, [activeDocument, viewerReadyRevision]);
+
+  // Restore persisted annotation toolbar defaults (highlight color/opacity…)
+  // into each freshly mounted viewer, and keep the store in sync when the
+  // user changes them. Plugin tool state is in-memory only.
+  useEffect(() => {
+    if (!activeDocument || viewerReadyRevision === 0) return;
+
+    const annotation = getAnnotationCapability(registryRef.current);
+    if (!annotation) return;
+
+    return setupToolDefaultsPersistence(annotation);
   }, [activeDocument, viewerReadyRevision]);
 
   // Shrink the loss window of the save debounce: flush pending annotation
