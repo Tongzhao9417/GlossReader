@@ -520,7 +520,18 @@ function loadStoredAnnotations(openDocument: OpenDocument) {
   const annotations =
     readStoredAnnotationMap()[getDocumentAnnotationKey(openDocument)] ?? [];
 
-  return annotations.map(normalizeStoredAnnotation);
+  // Stores written before ids were session-unique can hold duplicates (the id
+  // counter restarted at gloss-1 every launch). Re-id later duplicates so an
+  // id-keyed edit or delete can no longer hit two annotations at once.
+  const seenIds = new Set<string>();
+  return annotations.map((annotation) => {
+    const normalized = normalizeStoredAnnotation(annotation);
+    if (seenIds.has(normalized.id)) {
+      return { ...normalized, id: createGlossAnnotationId() };
+    }
+    seenIds.add(normalized.id);
+    return normalized;
+  });
 }
 
 function saveStoredAnnotations(
@@ -598,6 +609,12 @@ function isWordCharacter(char: string) {
 
 function createTranslationId() {
   return `translation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function describeTranslationError(error: unknown) {
+  return error instanceof Error && error.message
+    ? `翻译失败：${error.message}`
+    : "翻译失败";
 }
 
 function getWordCount(text: string) {
@@ -2978,7 +2995,7 @@ function App() {
         );
         window.requestAnimationFrame(renderActiveAnnotations);
       })
-      .catch(() => {
+      .catch((error) => {
         updateActiveDocumentTranslations((currentTranslations) =>
           currentTranslations.map((item) =>
             item.id === target.id
@@ -2986,7 +3003,7 @@ function App() {
                   ...item,
                   translation: "",
                   loading: false,
-                  error: "翻译失败",
+                  error: describeTranslationError(error),
                 }
               : item,
           ),
@@ -3243,7 +3260,7 @@ function App() {
                 : translation,
             ),
           );
-        } catch {
+        } catch (error) {
           updateActiveDocumentTranslations((currentTranslations) =>
             currentTranslations.map((translation) =>
               translation.id === translationId
@@ -3251,7 +3268,7 @@ function App() {
                     ...translation,
                     translation: "",
                     loading: false,
-                    error: "翻译失败",
+                    error: describeTranslationError(error),
                   }
                 : translation,
             ),

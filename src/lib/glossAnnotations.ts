@@ -12,6 +12,10 @@ const COLOR_MAP: Record<string, string> = {
   black: "#1f2328",
 };
 
+// Stored annotations keep their ids across launches, so new ids must never
+// repeat those of a previous session — a bare counter restarted at gloss-1
+// every launch and let id-keyed edit/delete clobber persisted annotations.
+const annotationIdSeed = Date.now().toString(36);
 let annotationCounter = 0;
 
 export interface PdfRectLike {
@@ -293,7 +297,7 @@ export function injectAnnotationStyles(
 }
 
 export function createGlossAnnotationId() {
-  return `gloss-${++annotationCounter}`;
+  return `gloss-${annotationIdSeed}-${++annotationCounter}`;
 }
 
 export function getAnnotationRenderScale(

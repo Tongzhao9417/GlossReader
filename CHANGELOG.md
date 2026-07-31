@@ -5,6 +5,13 @@ All notable changes to GlossReader are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Definitions and translations work with reasoning models again.** The per-request budget of 256 tokens also had to cover the model's hidden chain-of-thought; reasoning models such as DeepSeek V4 Flash routinely spend more than that thinking, so the reply arrived empty and GlossReader showed 无法获取释义 / 无法获取翻译. The budget is now 2048 tokens, and when a model still returns nothing the translation box shows the actual reason (truncation or the API error) instead of a bare 翻译失败.
+- **Annotations no longer corrupt or vanish after restarting the app.** Gloss ids restarted from 1 in every session, so glosses made after a restart reused the ids of glosses already saved on disk — updating a new gloss silently replaced an old annotation's text with the wrong word's definition, and deleting a new gloss also deleted the old annotation sharing its id. Ids are now unique across sessions, and duplicates already saved by older versions are repaired when a document is opened. (Definitions this bug previously overwrote can't be recovered automatically — re-gloss those words once.)
+
 ## [1.1.4] - 2026-07-17
 
 ### Fixed

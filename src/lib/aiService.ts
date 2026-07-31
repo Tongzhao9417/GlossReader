@@ -131,7 +131,9 @@ async function requestCompletion(
   const body = {
     model,
     messages: [{ role: "user" as const, content: prompt }],
-    max_tokens: 256,
+    // Reasoning models (e.g. deepseek-v4-flash) count chain-of-thought tokens
+    // against this cap; 256 left no room for the answer and came back empty.
+    max_tokens: 2048,
     temperature: 0.3,
   };
 
@@ -147,8 +149,16 @@ async function requestCompletion(
   }
 
   const data = await response.json();
-  const message = data.choices?.[0]?.message;
-  return message?.content?.trim() || "";
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content?.trim();
+  if (!content) {
+    throw new Error(
+      choice?.finish_reason === "length"
+        ? "模型输出被截断（推理耗尽了 token 上限），请重试"
+        : "模型未返回内容",
+    );
+  }
+  return content;
 }
 
 export async function fetchGloss(
@@ -156,9 +166,10 @@ export async function fetchGloss(
   sentence: string,
   settings: Settings,
 ): Promise<GlossResult> {
-  const definition =
-    (await requestCompletion(buildPrompt(word, sentence, settings), settings)) ||
-    "无法获取释义";
+  const definition = await requestCompletion(
+    buildPrompt(word, sentence, settings),
+    settings,
+  );
 
   return { word, definition };
 }
@@ -167,11 +178,10 @@ export async function fetchTranslation(
   sourceText: string,
   settings: Settings,
 ): Promise<TranslationResult> {
-  const translation =
-    (await requestCompletion(
-      buildTranslationPrompt(sourceText, settings),
-      settings,
-    )) || "无法获取翻译";
+  const translation = await requestCompletion(
+    buildTranslationPrompt(sourceText, settings),
+    settings,
+  );
 
   return { sourceText, translation };
 }
