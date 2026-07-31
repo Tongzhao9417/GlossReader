@@ -5,6 +5,12 @@ All notable changes to GlossReader are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-07-31
+
+### Fixed
+
+- **Saved annotations now appear when a PDF is opened while the window is hidden or covered.** All annotation drawing was scheduled through `requestAnimationFrame`, which macOS suspends for occluded windows — open or reopen a PDF while the GlossReader window wasn't fully visible on screen (covered by Zotero, a chat window, etc.) and saved glosses stayed invisible even though they were safely on disk, which looked exactly like annotations failing to save. Rendering now falls back to a plain timer whenever frame callbacks are suspended and repaints when the window becomes visible again, so saved annotations show up no matter how or when the document was opened.
+
 ## [1.1.5] - 2026-07-31
 
 ### Fixed

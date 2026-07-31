@@ -2069,6 +2069,7 @@ function App() {
   const scheduleRenderActiveAnnotations = useCallback(() => {
     if (renderAnnotationFrameRef.current !== null) {
       window.cancelAnimationFrame(renderAnnotationFrameRef.current);
+      renderAnnotationFrameRef.current = null;
     }
 
     for (const timeoutId of renderAnnotationTimeoutsRef.current) {
@@ -2080,13 +2081,32 @@ function App() {
       renderActiveAnnotations();
     };
 
+    // WKWebView suspends requestAnimationFrame entirely while the window is
+    // occluded, so a rAF-only pipeline leaves documents (re)opened in a hidden
+    // window without annotations until the window becomes visible again. Race
+    // the frame against a plain timeout — timers keep firing while hidden —
+    // and let whichever runs first render and cancel the other.
+    let ran = false;
+    const runOnce = () => {
+      if (ran) return;
+      ran = true;
+
+      if (renderAnnotationFrameRef.current !== null) {
+        window.cancelAnimationFrame(renderAnnotationFrameRef.current);
+        renderAnnotationFrameRef.current = null;
+      }
+
+      render();
+      renderAnnotationTimeoutsRef.current.push(
+        ...[50, 150, 300].map((delay) => window.setTimeout(render, delay)),
+      );
+    };
+
     renderAnnotationFrameRef.current = window.requestAnimationFrame(() => {
       renderAnnotationFrameRef.current = null;
-      render();
-      renderAnnotationTimeoutsRef.current = [50, 150, 300].map((delay) =>
-        window.setTimeout(render, delay),
-      );
+      runOnce();
     });
+    renderAnnotationTimeoutsRef.current.push(window.setTimeout(runOnce, 50));
   }, [renderActiveAnnotations]);
 
   useEffect(() => {
@@ -2249,6 +2269,12 @@ function App() {
 
     window.addEventListener("resize", schedule);
     window.document.addEventListener("scroll", schedule, true);
+    // Repaint when the window comes back from WKWebView's occluded state, in
+    // case any render scheduled while hidden was missed.
+    const handleVisibilityChange = () => {
+      if (window.document.visibilityState === "visible") schedule();
+    };
+    window.document.addEventListener("visibilitychange", handleVisibilityChange);
 
     const resizeObserver = new ResizeObserver(schedule);
     const container = embedPdfContainerRef.current;
@@ -2264,6 +2290,10 @@ function App() {
       }
       window.removeEventListener("resize", schedule);
       window.document.removeEventListener("scroll", schedule, true);
+      window.document.removeEventListener(
+        "visibilitychange",
+        handleVisibilityChange,
+      );
       resizeObserver.disconnect();
     };
   }, [activeDocument, scheduleRenderActiveAnnotations, viewerReadyRevision]);
