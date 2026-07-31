@@ -14,6 +14,20 @@ export async function readPdfFile(filePath: string): Promise<OpenPdfResult> {
   return { data, filePath };
 }
 
+/**
+ * Atomically overwrite a PDF on disk (temp file + rename on the Rust side).
+ * The path travels percent-encoded in a header because raw-body invokes carry
+ * no JSON args and header values must be ASCII (paths may contain CJK).
+ */
+export async function writePdfFile(
+  filePath: string,
+  data: Uint8Array,
+): Promise<void> {
+  await invoke("write_file_binary", data, {
+    headers: { "x-glossreader-path": encodeURIComponent(filePath) },
+  });
+}
+
 export async function openPdfFiles(): Promise<OpenPdfResult[]> {
   const filePaths = await open({
     multiple: true,

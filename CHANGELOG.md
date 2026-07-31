@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.6] - 2026-07-31
 
+### Added
+
+- **Highlights and other PDF annotations are now saved into the file.** Marks made with the Annotate/Shapes toolbars (highlight, underline, strikethrough, squiggly, ink, shapes) previously lived only in memory and vanished when the document was closed — they were never written anywhere. GlossReader now saves them into the PDF itself about a second after each change (atomically, via a temp file, so a failed save can never corrupt the original), which means they survive reopening, follow the file into Zotero / Preview / any other reader, and travel with copies of the file. Files opened without a real path (e.g. browser drag-in during development) are left untouched, and save failures show a clear error instead of silently losing marks.
+
 ### Fixed
 
 - **Saved annotations now appear when a PDF is opened while the window is hidden or covered.** All annotation drawing was scheduled through `requestAnimationFrame`, which macOS suspends for occluded windows — open or reopen a PDF while the GlossReader window wasn't fully visible on screen (covered by Zotero, a chat window, etc.) and saved glosses stayed invisible even though they were safely on disk, which looked exactly like annotations failing to save. Rendering now falls back to a plain timer whenever frame callbacks are suspended and repaints when the window becomes visible again, so saved annotations show up no matter how or when the document was opened.

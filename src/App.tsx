@@ -22,7 +22,11 @@ import { fonts as simplifiedChineseFonts } from "@embedpdf/fonts-sc";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
-import { openPdfFiles, readPdfFile, type OpenPdfResult } from "./lib/tauriCommands";
+import { openPdfFiles, readPdfFile, writePdfFile, type OpenPdfResult } from "./lib/tauriCommands";
+import {
+  createAnnotationAutosave,
+  type AnnotationAutosaveController,
+} from "./lib/annotationAutosave";
 import { type Settings as SettingsType, loadSettings, saveSettings } from "./lib/settings";
 import {
   DEFAULT_FIND_SHORTCUT,
@@ -359,6 +363,17 @@ interface ViewportCapabilityLike {
 interface ZoomCapabilityLike {
   onZoomChange?: (listener: () => void) => () => void;
   onStateChange?: (listener: () => void) => () => void;
+}
+
+interface AnnotationCapabilityLike {
+  commit: () => PdfTask<unknown>;
+  onAnnotationEvent?: (
+    listener: (event: { type: string }) => void,
+  ) => () => void;
+}
+
+interface ExportCapabilityLike {
+  saveAsCopy: () => PdfTask<ArrayBuffer | Uint8Array>;
 }
 
 interface PluginWithCapability<T> {
@@ -1101,6 +1116,14 @@ function getCommandsCapability(registry: PluginRegistry | null) {
   return getPluginCapability<CommandsCapabilityLike>(registry, "commands");
 }
 
+function getAnnotationCapability(registry: PluginRegistry | null) {
+  return getPluginCapability<AnnotationCapabilityLike>(registry, "annotation");
+}
+
+function getExportCapability(registry: PluginRegistry | null) {
+  return getPluginCapability<ExportCapabilityLike>(registry, "export");
+}
+
 function hasTextSelection(registry: PluginRegistry | null) {
   try {
     return Boolean(getSelectionCapability(registry)?.getState().selection);
@@ -1792,6 +1815,9 @@ function App() {
   const renderAnnotationFrameRef = useRef<number | null>(null);
   const renderAnnotationTimeoutsRef = useRef<number[]>([]);
   const registryRef = useRef<PluginRegistry | null>(null);
+  const annotationAutosaveRef = useRef<AnnotationAutosaveController | null>(
+    null,
+  );
   const embedPdfContainerRef = useRef<EmbedPdfContainer | null>(null);
   const selectionContextSnapshotRef =
     useRef<SelectionContextSnapshot | null>(null);
@@ -2297,6 +2323,69 @@ function App() {
       resizeObserver.disconnect();
     };
   }, [activeDocument, scheduleRenderActiveAnnotations, viewerReadyRevision]);
+
+  // Autosave native PDF annotations (highlights, ink, shapes…) into the file
+  // on disk. Only path-backed documents can be written back; browser-mode
+  // files are skipped. Runs once the viewer for the active document is ready
+  // (the annotation capability does not exist before that).
+  useEffect(() => {
+    if (!activeDocument?.filePath || viewerReadyRevision === 0 || !isTauri()) {
+      return;
+    }
+
+    const annotation = getAnnotationCapability(registryRef.current);
+    const exporter = getExportCapability(registryRef.current);
+    if (!annotation || !exporter) return;
+
+    const filePath = activeDocument.filePath;
+    const controller = createAnnotationAutosave({
+      annotation,
+      exporter,
+      writeFile: (bytes) => writePdfFile(filePath, bytes),
+      onError: setError,
+    });
+    annotationAutosaveRef.current = controller;
+
+    return () => {
+      if (annotationAutosaveRef.current === controller) {
+        annotationAutosaveRef.current = null;
+      }
+      // Best effort on tab switch/unmount: the engine may already be tearing
+      // down, so failures stay silent; the debounced path is the canonical
+      // error surface.
+      if (controller.isDirty()) {
+        void controller.flushNow(0, true);
+      }
+      controller.dispose();
+    };
+  }, [activeDocument, viewerReadyRevision]);
+
+  // Shrink the loss window of the save debounce: flush pending annotation
+  // changes when the window loses focus or gets hidden/occluded.
+  useEffect(() => {
+    const flushIfDirty = () => {
+      const controller = annotationAutosaveRef.current;
+      if (controller?.isDirty()) {
+        void controller.flushNow(0, true);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (window.document.visibilityState === "hidden") flushIfDirty();
+    };
+
+    window.addEventListener("blur", flushIfDirty);
+    window.document.addEventListener(
+      "visibilitychange",
+      handleVisibilityChange,
+    );
+    return () => {
+      window.removeEventListener("blur", flushIfDirty);
+      window.document.removeEventListener(
+        "visibilitychange",
+        handleVisibilityChange,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     const clearSelectedAnnotation = (event: PointerEvent) => {
@@ -3171,7 +3260,17 @@ function App() {
   }, [documents]);
 
   const handleCloseDocument = useCallback(
-    (documentId: string) => {
+    async (documentId: string) => {
+      // Give a pending native-annotation save a bounded chance to reach disk
+      // before the viewer (and with it the PDF engine) unmounts. Only the
+      // active document has a live viewer/controller.
+      if (documentId === activeDocumentId) {
+        const autosave = annotationAutosaveRef.current;
+        if (autosave?.isDirty()) {
+          await autosave.flushNow(2500);
+        }
+      }
+
       const closeIndex = documents.findIndex(
         (documentItem) => documentItem.id === documentId,
       );
